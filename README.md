@@ -1,105 +1,50 @@
 # BuferNet
 
-Передача буфера обмена и файлов между компьютерами в одной локальной сети.
-Программа висит в трее, автоматически находит другие компьютеры с запущенным
-BuferNet — не нужно вводить IP-адреса и что-либо настраивать.
+Clipboard and file transfer between computers on the same local network.
+Lives in the system tray and discovers other computers automatically —
+no IP addresses, no configuration.
 
-## Возможности
+## Features
 
-- 📋 Отправка текста из буфера обмена — на другом компе он сразу попадает
-  в буфер, остаётся только вставить.
-- 📁 Отправка файлов (сохраняются в `Загрузки\BuferNet`).
-- 🔍 Автообнаружение компьютеров в сети (UDP-broadcast), список обновляется сам.
-- 🖥 Интерфейс в стиле Windows 11: светлая/тёмная тема (по системной или вручную),
-  поддержка масштаба экрана 125/150%.
-- 🔔 Уведомления из трея о принятых буферах и файлах.
-- 🚀 Раскатка обновлений по сети: новая версия сама разъезжается по компам.
+- 📋 Send clipboard text — it lands straight in the other computer's clipboard
+- 📁 Send files — saved to a folder of your choice (`Downloads\BuferNet` by default)
+- 🔍 Automatic peer discovery on the LAN (UDP broadcast)
+- 🖥 Windows 11 style UI: light/dark theme, HiDPI aware
+- 🌍 Languages: English, Русский, Français, Deutsch, Español
+- 🔔 Tray notifications for received clipboard and files
+- 🚀 Network-wide updates: one click rolls a new version out to every computer
 
-## Установка
+## Install
 
-Готовый exe: скопируй `BuferNet.exe` на каждый компьютер и запусти —
-Python не требуется.
+Download `BuferNet.exe` from [Releases](../../releases) and run it on each
+computer — no Python required. Allow access to **private networks** when the
+Windows Firewall asks.
 
-Из исходников:
+From source:
 
 ```
 pip install -r requirements.txt
 pythonw main.py
 ```
 
-(`pythonw` — без окна консоли; для отладки используй `python main.py`.)
+## Notes
 
-## Как пользоваться
+- Computers must be on the same subnet; discovery does not cross routers or VPNs.
+- Theme, language and save folder are in the ⚙ menu.
+- To update the whole network: run a newer exe on one computer, then
+  ⚙ → *Roll out update to network*.
+- Security model: BuferNet trusts your LAN — there is no encryption or
+  authentication. Don't run it on networks you don't trust.
 
-1. Запусти программу на двух (или больше) компьютерах в одной сети.
-2. Через пару секунд в списке «Компьютеры в сети» появятся остальные машины.
-3. Выбери компьютер и нажми:
-   - **📋 Отправить буфер** — текст из твоего буфера обмена появится в буфере
-     обмена того компьютера;
-   - **📁 Отправить файлы…** — выбранные файлы сохранятся на том компьютере
-     в `Загрузки\BuferNet`.
-4. Крестик сворачивает программу в трей — она продолжает принимать файлы.
-   Выход — через правый клик по иконке в трее.
-
-Кнопка ⚙ в шапке: переключение темы (как в Windows / светлая / тёмная),
-папка принятых файлов, раскатка обновления.
-
-## Если компьютеры не видят друг друга
-
-- Разреши Python/BuferNet доступ к **частным сетям** в брандмауэре Windows
-  (окно с вопросом появляется при первом запуске). Либо вручную:
-
-  ```
-  netsh advfirewall firewall add rule name="BuferNet UDP" dir=in action=allow protocol=UDP localport=48765
-  netsh advfirewall firewall add rule name="BuferNet TCP" dir=in action=allow protocol=TCP localport=48766
-  ```
-
-- Сеть должна быть отмечена как «Частная», а не «Общедоступная»
-  (Параметры → Сеть и Интернет → Свойства сети).
-- Оба компьютера должны быть в одной подсети (один роутер). Обнаружение
-  работает через UDP-broadcast и не проходит через VPN и между подсетями.
-
-## Обновление по сети
-
-У приложения есть версия (видна в шапке окна и в списке компов). Чтобы
-обновить все компьютеры:
-
-1. Собери новый exe (не забудь поднять `VERSION` в `bufernet/config.py`).
-2. Запусти его у себя и нажми ⚙ → **Раскатать обновление на компы в сети**.
-3. Каждый комп со старой версией получит exe, сам заменит свой файл
-   и перезапустится. Журнал покажет, кто обновился.
-
-Обновления принимаются только с большей версией и только если программа
-запущена из собранного exe. Компы с версией до 1.1 механизм не понимают —
-их нужно один раз обновить вручную, дальше всё по сети.
-
-## Сборка в .exe
+## Build
 
 ```
 pip install pyinstaller
 pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --collect-all sv_ttk --exclude-module numpy --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module PIL.AvifImagePlugin --exclude-module PIL._avif --exclude-module PIL.WebPImagePlugin --exclude-module PIL._webp --exclude-module PIL._imagingft --exclude-module PIL.ImageCms --exclude-module PIL._imagingcms main.py
 ```
 
-Готовый `BuferNet.exe` появится в папке `dist`. Флаги `--exclude-module`
-выкидывают ненужное (кодеки картинок Pillow, TLS, numpy) — exe худеет
-с ~19 до ~11 МБ.
+Pushing a `v*` tag builds the exe and publishes a GitHub Release automatically.
 
-## Как это устроено
+## License
 
-- `bufernet/discovery.py` — обнаружение: каждые 3 секунды UDP-broadcast
-  на порт 48765 со всех сетевых интерфейсов (Wi-Fi, Ethernet и т.д.);
-  кто молчит 10 секунд — исчезает из списка.
-- `bufernet/transfer.py` — передача: TCP на порту 48766, простой протокол
-  «JSON-заголовок + данные» для буфера, файлов и обновлений.
-- `bufernet/app.py` — окно (tkinter + тема Sun Valley) и трей (pystray),
-  приём обновлений с самоперезапуском.
-- `bufernet/config.py` — версия, порты, настройки.
-
-Безопасность: программа доверяет своей локальной сети — шифрования
-и авторизации нет, обновления принимаются от любого компа в подсети
-с более новой версией. Не запускай её в сетях, которым не доверяешь.
-
-## Лицензия
-
-[MIT](LICENSE) — свободное использование, изменение и распространение,
-в том числе коммерческое.
+[MIT](LICENSE)

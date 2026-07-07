@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 APP_NAME = "BuferNet"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def version_tuple(v: str) -> tuple:
@@ -22,8 +22,10 @@ TRANSFER_PORT = 48766
 ANNOUNCE_INTERVAL = 3.0   # как часто объявлять о себе, сек
 PEER_TIMEOUT = 10.0       # через сколько секунд молчания комп считается пропавшим
 
-# Куда сохранять принятые файлы
-DOWNLOADS_DIR = Path.home() / "Downloads" / "BuferNet"
+# Куда сохранять принятые файлы (может быть переопределено настройкой
+# "download_dir" — приложение меняет DOWNLOADS_DIR при старте и из меню)
+DEFAULT_DOWNLOADS_DIR = Path.home() / "Downloads" / "BuferNet"
+DOWNLOADS_DIR = DEFAULT_DOWNLOADS_DIR
 
 # Максимальный размер текста буфера обмена (защита от мусора), байт
 MAX_CLIPBOARD_SIZE = 16 * 1024 * 1024

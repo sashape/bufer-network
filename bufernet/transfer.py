@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import config
+from .i18n import tr
 
 CHUNK = 64 * 1024
 
@@ -88,7 +89,7 @@ class TransferServer:
                     elif kind == "clipboard":
                         size = int(header["size"])
                         if size > config.MAX_CLIPBOARD_SIZE:
-                            raise ValueError("слишком большой буфер обмена")
+                            raise ValueError("clipboard too large")
                         text = self._read_exact(reader, size).decode("utf-8")
                         self.on_clipboard(text, sender)
                     elif kind == "file":
@@ -101,9 +102,9 @@ class TransferServer:
                     elif kind == "end":
                         break
                     else:
-                        raise ValueError(f"неизвестный тип элемента: {kind}")
+                        raise ValueError(f"unknown item type: {kind}")
         except Exception as e:  # приём не должен ронять программу
-            self.on_error(f"Ошибка приёма от {sender}: {e}")
+            self.on_error(tr("recv_error", name=sender, error=e))
 
     def _receive_file(self, reader, header: dict) -> Path:
         # берём только имя файла, отбрасывая любые пути от отправителя
@@ -128,7 +129,7 @@ class TransferServer:
                 while remaining > 0:
                     chunk = reader.read(min(CHUNK, remaining))
                     if not chunk:
-                        raise ConnectionError("соединение оборвалось при передаче")
+                        raise ConnectionError(tr("err_conn_lost"))
                     f.write(chunk)
                     remaining -= len(chunk)
         except Exception:
@@ -141,7 +142,7 @@ class TransferServer:
         while len(data) < size:
             chunk = reader.read(size - len(data))
             if not chunk:
-                raise ConnectionError("соединение оборвалось")
+                raise ConnectionError(tr("err_conn_lost"))
             data += chunk
         return data
 
@@ -178,7 +179,7 @@ def send_files(
     port: int,
     paths: list[Path],
     my_name: str,
-    on_progress: Callable[[str], None] = lambda msg: None,
+    on_progress: Callable[[str, int], None] = lambda name, size: None,
 ):
     with socket.create_connection((ip, port), timeout=10) as sock:
         sock.settimeout(60)
@@ -189,7 +190,7 @@ def send_files(
             with open(path, "rb") as f:
                 while chunk := f.read(CHUNK):
                     sock.sendall(chunk)
-            on_progress(f"Отправлен {path.name} ({_fmt_size(size)})")
+            on_progress(path.name, size)
         _send_header(sock, type="end")
 
 
@@ -206,14 +207,11 @@ def send_update(ip: str, port: int, exe_path: Path, version: str, my_name: str):
                 sock.sendall(chunk)
         _send_header(sock, type="end")
         if sock.recv(2) != b"OK":
-            raise RuntimeError(
-                "получатель не подтвердил приём — возможно, там версия без "
-                "поддержки обновлений, один раз обнови её вручную"
-            )
+            raise RuntimeError(tr("err_no_ack"))
 
 
-def _fmt_size(size: int) -> str:
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if size < 1024 or unit == "ГБ":
-            return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+def fmt_size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024

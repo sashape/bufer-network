@@ -1,7 +1,8 @@
 """Главное окно, иконка в трее и связка всех частей.
 
 Интерфейс в стиле Windows 11: тема Sun Valley (sv-ttk) + эффект Mica
-для окна (pywinstyles). Тёмная/светлая тема берётся из настроек Windows.
+для окна (pywinstyles). Тёмная/светлая тема и язык берутся из настроек
+Windows, но переключаются в меню ⚙.
 """
 import ctypes
 import os
@@ -24,7 +25,8 @@ try:
 except ImportError:  # не критично: просто не будет эффекта Mica
     pywinstyles = None
 
-from . import config, discovery, transfer
+from . import config, discovery, i18n, transfer
+from .i18n import tr
 
 
 def _enable_dpi_awareness():
@@ -79,6 +81,12 @@ class App:
         # очередь для вызовов из фоновых потоков в поток GUI
         self._ui_queue: queue.Queue = queue.Queue()
 
+        # настройки: тема, язык, папка сохранения
+        self.settings = config.load_settings()
+        saved_dir = self.settings.get("download_dir")
+        if saved_dir:
+            config.DOWNLOADS_DIR = Path(saved_dir)
+
         # окно
         _enable_dpi_awareness()
         self.root = tk.Tk()
@@ -90,8 +98,11 @@ class App:
         self.root.minsize(self._px(400), self._px(460))
         self.root.protocol("WM_DELETE_WINDOW", self._hide_window)
 
+        # язык: "auto" (как в Windows) или код из i18n.LANGUAGES
+        self._lang_var = tk.StringVar(value=self.settings.get("lang", "auto"))
+        self._apply_language()
+
         # тема: "auto" (как в Windows) / "light" / "dark"
-        self.settings = config.load_settings()
         self._theme_var = tk.StringVar(value=self.settings.get("theme", "auto"))
         self.dark = self._resolve_dark()
         sv_ttk.set_theme("dark" if self.dark else "light", self.root)
@@ -104,22 +115,21 @@ class App:
 
         # трей
         self.tray = pystray.Icon(
-            config.APP_NAME,
-            self._icon_image,
-            config.APP_NAME,
-            menu=pystray.Menu(
-                pystray.MenuItem(
-                    "Показать окно",
-                    lambda: self._ui(self._show_window),
-                    default=True,
-                ),
-                pystray.MenuItem("Выход", lambda: self._ui(self._quit)),
-            ),
+            config.APP_NAME, self._icon_image, config.APP_NAME,
+            menu=self._tray_menu(),
         )
 
     def _px(self, n: int) -> int:
         """Пиксели с учётом масштаба Windows."""
         return round(n * self.scale)
+
+    def _tray_menu(self) -> pystray.Menu:
+        return pystray.Menu(
+            pystray.MenuItem(
+                tr("tray_show"), lambda: self._ui(self._show_window), default=True,
+            ),
+            pystray.MenuItem(tr("tray_exit"), lambda: self._ui(self._quit)),
+        )
 
     def _resolve_dark(self) -> bool:
         theme = self._theme_var.get()
@@ -139,29 +149,34 @@ class App:
         except Exception:
             pass  # на Windows 10 и старше эффектов просто не будет
 
-    # --- настройки / тема ---
+    # --- настройки: тема, язык, папка ---
 
     def _show_settings_menu(self):
         menu = tk.Menu(self.root, tearoff=0, font=("Segoe UI", 10))
         menu.add_command(label=f"{config.APP_NAME} v{config.VERSION}", state="disabled")
         menu.add_separator()
-        for label, value in (
-            ("Тема как в Windows", "auto"),
-            ("Светлая тема", "light"),
-            ("Тёмная тема", "dark"),
+        for label_key, value in (
+            ("theme_auto", "auto"), ("theme_light", "light"), ("theme_dark", "dark"),
         ):
             menu.add_radiobutton(
-                label=label, value=value, variable=self._theme_var,
+                label=tr(label_key), value=value, variable=self._theme_var,
                 command=lambda v=value: self._set_theme(v),
             )
+        lang_menu = tk.Menu(menu, tearoff=0, font=("Segoe UI", 10))
+        lang_menu.add_radiobutton(
+            label=tr("lang_auto"), value="auto", variable=self._lang_var,
+            command=lambda: self._set_language("auto"),
+        )
+        for code, name in i18n.LANGUAGES.items():
+            lang_menu.add_radiobutton(
+                label=name, value=code, variable=self._lang_var,
+                command=lambda c=code: self._set_language(c),
+            )
+        menu.add_cascade(label=tr("menu_language"), menu=lang_menu)
         menu.add_separator()
-        menu.add_command(
-            label="Раскатать обновление на компы в сети",
-            command=self._rollout_update,
-        )
-        menu.add_command(
-            label="Открыть папку принятых файлов", command=self._open_downloads,
-        )
+        menu.add_command(label=tr("menu_rollout"), command=self._rollout_update)
+        menu.add_command(label=tr("menu_open_folder"), command=self._open_downloads)
+        menu.add_command(label=tr("menu_change_folder"), command=self._change_folder)
         btn = self._settings_btn
         menu.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
 
@@ -194,18 +209,53 @@ class App:
             fg="#d6d6d6" if self.dark else "#333333",
         )
 
+    def _apply_language(self):
+        value = self._lang_var.get()
+        i18n.set_language(
+            i18n.detect_system_language() if value == "auto" else value
+        )
+
+    def _set_language(self, value: str):
+        self.settings["lang"] = value
+        config.save_settings(self.settings)
+        self._apply_language()
+        self._retranslate()
+
+    def _retranslate(self):
+        """Обновить подписи виджетов после смены языка."""
+        self._peers_label.config(text=tr("peers"))
+        self._log_label.config(text=tr("log"))
+        self._btn_clip.config(text=f"📋  {tr('btn_clipboard')}")
+        self._btn_files.config(text=f"📁  {tr('btn_files')}")
+        self._shown = None  # перерисовать список (плейсхолдер, «старая версия»)
+        self.tray.menu = self._tray_menu()
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass  # трей мог ещё не запуститься
+
     def _open_downloads(self):
         config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
         os.startfile(config.DOWNLOADS_DIR)
+
+    def _change_folder(self):
+        chosen = filedialog.askdirectory(
+            parent=self.root, title=tr("folder_dialog_title"),
+            initialdir=str(config.DOWNLOADS_DIR),
+        )
+        if not chosen:
+            return
+        config.DOWNLOADS_DIR = Path(chosen)
+        self.settings["download_dir"] = chosen
+        config.save_settings(self.settings)
+        self._log(tr("log_downloads", dir=config.DOWNLOADS_DIR))
 
     # --- обновление по сети ---
 
     def _rollout_update(self):
         if not getattr(sys, "frozen", False):
             messagebox.showinfo(
-                config.APP_NAME,
-                "Раскатка обновления работает только из собранного BuferNet.exe.",
-                parent=self.root,
+                config.APP_NAME, tr("rollout_exe_only"), parent=self.root
             )
             return
         mine = config.version_tuple(config.VERSION)
@@ -216,15 +266,14 @@ class App:
         if not targets:
             messagebox.showinfo(
                 config.APP_NAME,
-                f"У всех компьютеров в сети уже v{config.VERSION} или новее.",
+                tr("rollout_all_current", version=config.VERSION),
                 parent=self.root,
             )
             return
         names = ", ".join(p.name for p in targets)
         if not messagebox.askyesno(
             config.APP_NAME,
-            f"Отправить BuferNet v{config.VERSION} на: {names}?\n"
-            "Каждый комп сам заменит exe и перезапустится.",
+            tr("rollout_confirm", version=config.VERSION, names=names),
             parent=self.root,
         ):
             return
@@ -233,34 +282,31 @@ class App:
         def worker():
             for p in targets:
                 try:
-                    self._ui(self._log, f"Отправка обновления на {p.name}…")
+                    self._ui(self._log, tr("rollout_sending", name=p.name))
                     transfer.send_update(
                         p.ip, p.port, exe, config.VERSION, self.disco.my_name
                     )
-                    self._ui(self._log, f"{p.name} получил v{config.VERSION} и перезапускается")
+                    self._ui(self._log, tr("rollout_ok", name=p.name, version=config.VERSION))
                 except Exception as e:
-                    self._ui(self._log, f"Не удалось обновить {p.name}: {e}")
+                    self._ui(self._log, tr("rollout_fail", name=p.name, error=e))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_update_received(self, path: Path, version: str, sender: str):
         def apply():
             if config.version_tuple(version) <= config.version_tuple(config.VERSION):
-                self._log(
-                    f"Обновление v{version} от {sender} не новее моей "
-                    f"v{config.VERSION} — пропущено"
-                )
+                self._log(tr(
+                    "update_skip_old",
+                    version=version, name=sender, current=config.VERSION,
+                ))
                 path.unlink(missing_ok=True)
                 return
             if not getattr(sys, "frozen", False):
-                self._log(
-                    f"Обновление v{version} от {sender} пропущено: "
-                    "программа запущена не из exe"
-                )
+                self._log(tr("update_skip_noexe", version=version, name=sender))
                 path.unlink(missing_ok=True)
                 return
-            self._log(f"Получено обновление v{version} от {sender} — перезапуск…")
-            self._notify(f"Обновление до v{version} от {sender}, перезапускаюсь")
+            self._log(tr("update_received", version=version, name=sender))
+            self._notify(tr("notify_update", version=version, name=sender))
             self._apply_update(path)
         self._ui(apply)
 
@@ -304,11 +350,12 @@ class App:
         self.server.start()
         self.disco.start()
         threading.Thread(target=self.tray.run, daemon=True).start()
-        self._log(
-            f"{config.APP_NAME} v{config.VERSION} — {self.disco.my_name}, "
-            f"порт {self.server.port}"
-        )
-        self._log(f"Принятые файлы: {config.DOWNLOADS_DIR}")
+        self._log(tr(
+            "log_start",
+            app=config.APP_NAME, version=config.VERSION,
+            name=self.disco.my_name, port=self.server.port,
+        ))
+        self._log(tr("log_downloads", dir=config.DOWNLOADS_DIR))
         self.root.after(200, self._poll)
         self.root.mainloop()
 
@@ -334,7 +381,7 @@ class App:
         main = ttk.Frame(self.root, padding=(px(16), px(12), px(16), px(16)))
         main.pack(fill="both", expand=True)
 
-        # шапка: название + имя этого устройства
+        # шапка: название, версия, имя устройства, настройки
         header = ttk.Frame(main)
         header.pack(fill="x")
         ttk.Label(
@@ -350,14 +397,14 @@ class App:
         )
         self._settings_btn.pack(side="right", pady=(6, 0))
         self._device_label = ttk.Label(
-            header, text=f"💻 {self.disco.my_name}",
-            font=("Segoe UI", 10),
+            header, text=f"💻 {self.disco.my_name}", font=("Segoe UI", 10),
         )
         self._device_label.pack(side="right", pady=(10, 0), padx=(0, px(10)))
 
-        ttk.Label(
-            main, text="Компьютеры в сети", font=("Segoe UI Semibold", 11),
-        ).pack(anchor="w", pady=(14, 6))
+        self._peers_label = ttk.Label(
+            main, text=tr("peers"), font=("Segoe UI Semibold", 11),
+        )
+        self._peers_label.pack(anchor="w", pady=(14, 6))
 
         # список компов — Treeview, чтобы был в стиле Win11
         style = ttk.Style(self.root)
@@ -367,23 +414,23 @@ class App:
             style="Peers.Treeview",
         )
         self.peer_tree.pack(fill="x")
-        self.peer_tree.tag_configure(
-            "muted", foreground="#8a8a8a" if self.dark else "#7a7a7a"
-        )
 
         btns = ttk.Frame(main)
         btns.pack(fill="x", pady=(12, 0))
-        ttk.Button(
-            btns, text="📋  Отправить буфер", style="Accent.TButton",
+        self._btn_clip = ttk.Button(
+            btns, text=f"📋  {tr('btn_clipboard')}", style="Accent.TButton",
             command=self._send_clipboard,
-        ).pack(side="left", expand=True, fill="x", padx=(0, 8), ipady=2)
-        ttk.Button(
-            btns, text="📁  Отправить файлы…", command=self._send_files,
-        ).pack(side="left", expand=True, fill="x", ipady=2)
+        )
+        self._btn_clip.pack(side="left", expand=True, fill="x", padx=(0, 8), ipady=2)
+        self._btn_files = ttk.Button(
+            btns, text=f"📁  {tr('btn_files')}", command=self._send_files,
+        )
+        self._btn_files.pack(side="left", expand=True, fill="x", ipady=2)
 
-        ttk.Label(
-            main, text="Журнал", font=("Segoe UI Semibold", 11),
-        ).pack(anchor="w", pady=(16, 6))
+        self._log_label = ttk.Label(
+            main, text=tr("log"), font=("Segoe UI Semibold", 11),
+        )
+        self._log_label.pack(anchor="w", pady=(16, 6))
 
         log_frame = ttk.Frame(main)
         log_frame.pack(fill="both", expand=True)
@@ -391,8 +438,6 @@ class App:
             log_frame, height=8, state="disabled", wrap="word",
             font=("Segoe UI", 10), relief="flat", highlightthickness=0,
             padx=px(10), pady=px(8),
-            bg="#1f1f1f" if self.dark else "#fbfbfb",
-            fg="#d6d6d6" if self.dark else "#333333",
         )
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -416,10 +461,10 @@ class App:
         if not peers:
             self.peer_tree.insert(
                 "", "end", iid="__none__",
-                text="  Поиск компьютеров в сети…", tags=("muted",),
+                text=f"  {tr('searching')}", tags=("muted",),
             )
         for p in peers:
-            ver = f"v{p.version}" if p.version else "старая версия"
+            ver = f"v{p.version}" if p.version else tr("old_version")
             self.peer_tree.insert(
                 "", "end", iid=p.peer_id,
                 text=f"  💻  {p.name}    {p.ip}    ·  {ver}",
@@ -437,15 +482,13 @@ class App:
         selected = self.peer_tree.selection()
         peer = self._peers_by_id.get(selected[0]) if selected else None
         if not peer:
-            messagebox.showinfo(
-                config.APP_NAME, "Сначала выбери компьютер в списке.", parent=self.root
-            )
+            messagebox.showinfo(config.APP_NAME, tr("select_peer"), parent=self.root)
             return None
         return peer
 
-    def _log(self, msg: str):
+    def _log(self, msg):
         self.log_text.config(state="normal")
-        self.log_text.insert("end", msg + "\n")
+        self.log_text.insert("end", str(msg) + "\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
@@ -457,15 +500,15 @@ class App:
             return
         text = pyperclip.paste()
         if not text:
-            messagebox.showinfo(config.APP_NAME, "Буфер обмена пуст.", parent=self.root)
+            messagebox.showinfo(config.APP_NAME, tr("clipboard_empty"), parent=self.root)
             return
 
         def worker():
             try:
                 transfer.send_clipboard(peer.ip, peer.port, text, self.disco.my_name)
-                self._ui(self._log, f"Буфер отправлен на {peer.name}")
+                self._ui(self._log, tr("clip_sent", name=peer.name))
             except Exception as e:
-                self._ui(self._log, f"Не удалось отправить буфер на {peer.name}: {e}")
+                self._ui(self._log, tr("clip_send_fail", name=peer.name, error=e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -473,21 +516,26 @@ class App:
         peer = self._selected_peer()
         if not peer:
             return
-        filenames = filedialog.askopenfilenames(parent=self.root, title="Какие файлы отправить?")
+        filenames = filedialog.askopenfilenames(
+            parent=self.root, title=tr("file_dialog_title")
+        )
         if not filenames:
             return
         paths = [Path(f) for f in filenames]
 
         def worker():
             try:
-                self._ui(self._log, f"Отправка {len(paths)} файл(ов) на {peer.name}…")
+                self._ui(self._log, tr("sending_files", count=len(paths), name=peer.name))
                 transfer.send_files(
                     peer.ip, peer.port, paths, self.disco.my_name,
-                    on_progress=lambda msg: self._ui(self._log, msg),
+                    on_progress=lambda file, size: self._ui(
+                        self._log,
+                        tr("file_sent", file=file, size=transfer.fmt_size(size)),
+                    ),
                 )
-                self._ui(self._log, f"Готово: всё отправлено на {peer.name}")
+                self._ui(self._log, tr("files_done", name=peer.name))
             except Exception as e:
-                self._ui(self._log, f"Ошибка отправки на {peer.name}: {e}")
+                self._ui(self._log, tr("files_fail", name=peer.name, error=e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -499,14 +547,14 @@ class App:
             preview = text.strip().replace("\n", " ")
             if len(preview) > 60:
                 preview = preview[:60] + "…"
-            self._log(f"Буфер от {sender}: {preview}")
-            self._notify(f"Буфер обмена получен от {sender}")
+            self._log(tr("clip_received", name=sender, preview=preview))
+            self._notify(tr("notify_clip", name=sender))
         self._ui(apply)
 
     def _on_file_received(self, path: Path, sender: str):
         def apply():
-            self._log(f"Файл от {sender}: {path.name} → {path}")
-            self._notify(f"Файл {path.name} получен от {sender}")
+            self._log(tr("file_received", name=sender, file=path))
+            self._notify(tr("notify_file", file=path.name, name=sender))
         self._ui(apply)
 
     def _notify(self, msg: str):
@@ -519,7 +567,7 @@ class App:
 
     def _hide_window(self):
         self.root.withdraw()
-        self._notify("Программа свёрнута в трей и продолжает принимать файлы")
+        self._notify(tr("tray_minimized"))
 
     def _show_window(self):
         self.root.deiconify()
