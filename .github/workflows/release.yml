@@ -22,7 +22,7 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Сборка exe
-        run: pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --exclude-module numpy --collect-all sv_ttk main.py
+        run: pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --collect-all sv_ttk --exclude-module numpy --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module PIL.AvifImagePlugin --exclude-module PIL._avif --exclude-module PIL.WebPImagePlugin --exclude-module PIL._webp --exclude-module PIL._imagingft --exclude-module PIL.ImageCms --exclude-module PIL._imagingcms main.py
 
       - name: Релиз с exe
         run: gh release create ${{ github.ref_name }} dist/BuferNet.exe --generate-notes

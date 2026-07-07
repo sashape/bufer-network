@@ -77,10 +77,12 @@ pythonw main.py
 
 ```
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --exclude-module numpy --collect-all sv_ttk main.py
+pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --collect-all sv_ttk --exclude-module numpy --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module PIL.AvifImagePlugin --exclude-module PIL._avif --exclude-module PIL.WebPImagePlugin --exclude-module PIL._webp --exclude-module PIL._imagingft --exclude-module PIL.ImageCms --exclude-module PIL._imagingcms main.py
 ```
 
-Готовый `BuferNet.exe` появится в папке `dist`.
+Готовый `BuferNet.exe` появится в папке `dist`. Флаги `--exclude-module`
+выкидывают ненужное (кодеки картинок Pillow, TLS, numpy) — exe худеет
+с ~19 до ~11 МБ.
 
 ## Как это устроено
 
