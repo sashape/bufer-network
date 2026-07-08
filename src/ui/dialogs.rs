@@ -14,10 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::config;
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+use crate::util::wide;
 
 pub fn info(hwnd: HWND, text: &str) {
     let text = wide(text);

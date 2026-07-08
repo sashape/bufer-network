@@ -79,7 +79,9 @@ pub fn load_settings() -> Settings {
     let Ok(text) = std::fs::read_to_string(settings_file()) else {
         return s;
     };
-    let Some(map) = json::parse_object(&text) else {
+    // некоторые редакторы сохраняют файл с UTF-8 BOM — не даём ему сорвать разбор
+    let text = text.trim_start_matches('\u{feff}');
+    let Some(map) = json::parse_object(text) else {
         return s;
     };
     let get = |k: &str| -> Option<String> {

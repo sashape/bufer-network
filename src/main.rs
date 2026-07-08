@@ -14,6 +14,7 @@ mod icon;
 mod json;
 mod transfer;
 mod ui;
+mod util;
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, LPARAM, WPARAM};

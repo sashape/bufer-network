@@ -37,27 +37,40 @@ use crate::config;
 use crate::discovery::{Discovery, Peer};
 use crate::events::{self, UiEvent};
 use crate::i18n::{self, tr, trf};
+use crate::util::wide;
 use crate::{clipboard, hotkeys, icon, transfer};
 
 use render::{HAlign, Rect};
 use tray::TRAY_MSG;
 
-// команды меню
+// команды меню настроек (шестерёнка)
 const CMD_THEME_AUTO: u32 = 110;
 const CMD_THEME_LIGHT: u32 = 111;
 const CMD_THEME_DARK: u32 = 112;
-const CMD_LANG_AUTO: u32 = 120; // 121..=125 — языки по порядку
-const CMD_ROLLOUT: u32 = 130;
-const CMD_CHANGE_FOLDER: u32 = 132;
-const CMD_AUTOSTART: u32 = 133;
-const CMD_EXIT: u32 = 134;
-const CMD_HOTKEY_CLIP: u32 = 150;
-const CMD_HOTKEY_FILES: u32 = 151;
+const CMD_LANG_AUTO: u32 = 120; // языки: 121..=(120 + LANGUAGES.len())
+const CMD_HOTKEY_CLIP: u32 = 130;
+const CMD_HOTKEY_FILES: u32 = 131;
+const CMD_AUTOSTART: u32 = 132;
+const CMD_ROLLOUT: u32 = 133;
+const CMD_CHANGE_FOLDER: u32 = 134;
+const CMD_EXIT: u32 = 135;
+// команды меню трея
 const CMD_TRAY_SHOW: u32 = 140;
 const CMD_TRAY_EXIT: u32 = 141;
 
 const ROWS_VISIBLE: usize = 5;
 const ROW_H: f32 = 38.0;
+const PAD: f32 = 16.0; // правый/общий отступ окна
+const PAD_L: f32 = 22.0; // левый отступ чуть больше — так содержимое дышит
+
+/// Глифы Segoe Fluent Icons (на Win10 — Segoe MDL2 Assets).
+mod ico {
+    pub const CLIPBOARD: u32 = 0xF0E3;
+    pub const FILE: u32 = 0xE8A5;
+    pub const FOLDER: u32 = 0xE838;
+    pub const PC: u32 = 0xE7F4;
+    pub const GEAR: u32 = 0xE713;
+}
 
 /// Что делать по клику на последнее уведомление в трее.
 #[derive(Clone, PartialEq)]
@@ -87,6 +100,17 @@ struct Layout {
     log: Rect,
 }
 
+/// Всё состояние журнала: строки и прокрутка/ползунок.
+#[derive(Default)]
+struct LogView {
+    lines: Vec<String>,
+    scroll: f32,
+    at_bottom: bool,
+    view: (f32, f32),  // (content_h, view_h) после последнего кадра
+    bar: Option<Rect>, // прямоугольник ползунка (для попадания мышью)
+    drag: Option<f32>, // смещение точки захвата от верха ползунка при перетаскивании
+}
+
 struct App {
     hwnd: HWND,
     scale: f32,
@@ -98,12 +122,7 @@ struct App {
     peers_sig: Option<Vec<String>>,
     selected: Option<String>,
     peer_scroll: usize,
-    log: Vec<String>,
-    log_scroll: f32,
-    log_at_bottom: bool,
-    log_view: (f32, f32), // (content_h, view_h) после последнего кадра
-    log_bar: Option<Rect>,
-    drag_bar: Option<f32>, // смещение точки захвата от верха ползунка
+    log: LogView,
     hover: Hit,
     pressed: Option<Hit>,
     tracking_leave: bool,
@@ -147,12 +166,7 @@ pub fn run(disco: Arc<Discovery>, server_port: u16) {
             peers_sig: None,
             selected: None,
             peer_scroll: 0,
-            log: Vec::new(),
-            log_scroll: 0.0,
-            log_at_bottom: true,
-            log_view: (0.0, 0.0),
-            log_bar: None,
-            drag_bar: None,
+            log: LogView { at_bottom: true, ..Default::default() },
             hover: Hit::None,
             pressed: None,
             tracking_leave: false,
@@ -162,7 +176,7 @@ pub fn run(disco: Arc<Discovery>, server_port: u16) {
             capturing: None,
         });
 
-        let title: Vec<u16> = config::APP_NAME.encode_utf16().chain([0]).collect();
+        let title = wide(config::APP_NAME);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class_name,
@@ -247,6 +261,12 @@ fn resolve_dark(pref: &str) -> bool {
         "dark" => true,
         _ => windows_is_dark(),
     }
+}
+
+/// Пункт всплывающего меню из &str — общий для меню настроек и меню трея.
+unsafe fn menu_item(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str) {
+    let w = wide(text);
+    let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(w.as_ptr()));
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -356,7 +376,7 @@ impl App {
                         let _ = TrackMouseEvent(&mut tme);
                         self.tracking_leave = true;
                     }
-                    if let Some(grab) = self.drag_bar {
+                    if let Some(grab) = self.log.drag {
                         self.drag_log_bar(y, grab);
                     } else {
                         let hit = self.hit_test(x, y);
@@ -381,8 +401,8 @@ impl App {
                     self.pressed = Some(hit);
                     SetCapture(self.hwnd);
                     if hit == Hit::LogBar {
-                        if let Some(bar) = self.log_bar {
-                            self.drag_bar = Some(y - bar.t);
+                        if let Some(bar) = self.log.bar {
+                            self.log.drag = Some(y - bar.t);
                         }
                     }
                     self.invalidate();
@@ -391,7 +411,7 @@ impl App {
                 WM_LBUTTONUP => {
                     let (x, y) = self.mouse_pos(lparam);
                     let _ = ReleaseCapture();
-                    self.drag_bar = None;
+                    self.log.drag = None;
                     let hit = self.hit_test(x, y);
                     let pressed = self.pressed.take();
                     self.invalidate();
@@ -523,18 +543,20 @@ impl App {
 
     fn layout(&self) -> Layout {
         let (w, h) = self.client_size();
-        let pad = 16.0;
+        let (pad, pad_l) = (PAD, PAD_L);
         let list_top = 84.0;
-        let list = Rect::new(pad, list_top, w - pad, list_top + 8.0 + ROWS_VISIBLE as f32 * ROW_H);
+        let list = Rect::new(pad_l, list_top, w - pad, list_top + 8.0 + ROWS_VISIBLE as f32 * ROW_H);
         let btn_top = list.b + 14.0;
-        // [буфер][файлы][📂 папка]: папка фиксированной ширины, остальные — поровну
-        let folder_w = 96.0;
-        let btn_folder = Rect::new(w - pad - folder_w, btn_top, w - pad, btn_top + 36.0);
-        let flex = (btn_folder.l - 8.0 - pad - 8.0) / 2.0;
-        let btn_clip = Rect::new(pad, btn_top, pad + flex, btn_top + 36.0);
-        let btn_files = Rect::new(pad + flex + 8.0, btn_top, btn_folder.l - 8.0, btn_top + 36.0);
-        let log_top = btn_top + 36.0 + 44.0;
-        let log = Rect::new(pad, log_top, w - pad, (h - pad).max(log_top + 40.0));
+        let btn_h = 36.0;
+        // строка 1: две кнопки отправки поровну на всю ширину
+        let mid = (pad_l + (w - pad)) / 2.0;
+        let btn_clip = Rect::new(pad_l, btn_top, mid - 4.0, btn_top + btn_h);
+        let btn_files = Rect::new(mid + 4.0, btn_top, w - pad, btn_top + btn_h);
+        // строка 2: папка отдельной кнопкой во всю ширину — влезает полное название
+        let folder_top = btn_top + btn_h + 8.0;
+        let btn_folder = Rect::new(pad_l, folder_top, w - pad, folder_top + btn_h);
+        let log_top = folder_top + btn_h + 44.0;
+        let log = Rect::new(pad_l, log_top, w - pad, (h - pad).max(log_top + 40.0));
         Layout {
             gear: Rect::new(w - pad - 36.0, 16.0, w - pad, 16.0 + 32.0),
             list,
@@ -559,7 +581,7 @@ impl App {
         if l.btn_folder.contains(x, y) {
             return Hit::BtnFolder;
         }
-        if let Some(bar) = self.log_bar {
+        if let Some(bar) = self.log.bar {
             // ползунок ловится с запасом по ширине
             if Rect::new(bar.l - 4.0, bar.t, bar.r + 4.0, bar.b).contains(x, y) {
                 return Hit::LogBar;
@@ -580,10 +602,10 @@ impl App {
     fn wheel(&mut self, x: f32, y: f32, delta: f32) {
         let l = self.layout();
         if l.log.contains(x, y) || matches!(self.hover, Hit::LogBar) {
-            let (content, view) = self.log_view;
+            let (content, view) = self.log.view;
             let max = (content - view).max(0.0);
-            self.log_scroll = (self.log_scroll - delta * 48.0).clamp(0.0, max);
-            self.log_at_bottom = self.log_scroll >= max - 1.0;
+            self.log.scroll = (self.log.scroll - delta * 48.0).clamp(0.0, max);
+            self.log.at_bottom = self.log.scroll >= max - 1.0;
             self.invalidate();
         } else if l.list.contains(x, y) {
             let max = self.peers.len().saturating_sub(ROWS_VISIBLE);
@@ -594,8 +616,8 @@ impl App {
     }
 
     fn drag_log_bar(&mut self, y: f32, grab: f32) {
-        let (content, view) = self.log_view;
-        let Some(bar) = self.log_bar else { return };
+        let (content, view) = self.log.view;
+        let Some(bar) = self.log.bar else { return };
         let l = self.layout();
         let track_top = l.log.t + 4.0;
         let track_h = l.log.h() - 8.0;
@@ -605,8 +627,8 @@ impl App {
             return;
         }
         let ratio = ((y - grab) - track_top) / (track_h - bar_h);
-        self.log_scroll = (ratio.clamp(0.0, 1.0)) * max_scroll;
-        self.log_at_bottom = self.log_scroll >= max_scroll - 1.0;
+        self.log.scroll = (ratio.clamp(0.0, 1.0)) * max_scroll;
+        self.log.at_bottom = self.log.scroll >= max_scroll - 1.0;
         self.invalidate();
     }
 
@@ -663,7 +685,7 @@ impl App {
     }
 
     fn push_log(&mut self, msg: String) {
-        self.log.push(msg);
+        self.log.lines.push(msg);
         self.invalidate();
     }
 
@@ -673,20 +695,21 @@ impl App {
         self.tray.notify(msg);
     }
 
-    /// Открыть папку принятых файлов.
+    /// Открыть папку принятых файлов. Зовём explorer.exe явно, а путь
+    /// передаём аргументом: ShellExecute("open", path) по имени без
+    /// расширения может через PATHEXT запустить одноимённый BuferNet.exe,
+    /// лежащий рядом с папкой, вместо её открытия.
     fn open_downloads(&self) {
         let dir = config::downloads_dir();
         let _ = std::fs::create_dir_all(&dir);
-        // прямые слэши из старых настроек ShellExecute переживает,
-        // но нормализуем для единообразия
         let normalized = dir.display().to_string().replace('/', "\\");
-        let wide: Vec<u16> = normalized.encode_utf16().chain([0]).collect();
+        let arg = wide(&format!("\"{normalized}\""));
         unsafe {
             ShellExecuteW(
                 self.hwnd,
                 w!("open"),
-                PCWSTR(wide.as_ptr()),
-                PCWSTR::null(),
+                w!("explorer.exe"),
+                PCWSTR(arg.as_ptr()),
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
             );
@@ -698,14 +721,13 @@ impl App {
         // explorer /select молча игнорирует прямые слэши (а они приходят
         // из настроек, записанных Python-версией) — нормализуем
         let normalized = path.display().to_string().replace('/', "\\");
-        let args = format!("/select,\"{normalized}\"");
-        let wide: Vec<u16> = args.encode_utf16().chain([0]).collect();
+        let arg = wide(&format!("/select,\"{normalized}\""));
         unsafe {
             ShellExecuteW(
                 self.hwnd,
                 w!("open"),
                 w!("explorer.exe"),
-                PCWSTR(wide.as_ptr()),
+                PCWSTR(arg.as_ptr()),
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
             );
@@ -774,13 +796,7 @@ impl App {
     fn send_clipboard(&mut self, toast: bool) {
         let Some(peer) = self.require_peer() else { return };
         let my_name = self.disco.my_name.clone();
-        let report = move |msg: String| {
-            if toast {
-                events::push(UiEvent::Toast(msg));
-            } else {
-                events::log(msg);
-            }
-        };
+        let report = move |msg: String| events::report(toast, msg);
         // в буфере текст — шлём текст; иначе картинка (скриншот и т.п.)
         let text = clipboard::get_text().unwrap_or_default();
         if !text.is_empty() {
@@ -800,7 +816,7 @@ impl App {
             return;
         };
         if dib.len() as u64 > config::MAX_IMAGE_SIZE {
-            dialogs::info(self.hwnd, &tr("clipboard_empty"));
+            dialogs::info(self.hwnd, &tr("image_too_large"));
             return;
         }
         std::thread::spawn(move || {
@@ -839,11 +855,7 @@ impl App {
                     ("error", &e.to_string()),
                 ]),
             };
-            if toast {
-                events::push(UiEvent::Toast(msg));
-            } else {
-                events::log(msg);
-            }
+            events::report(toast, msg);
         });
     }
 
@@ -864,10 +876,8 @@ impl App {
 
     unsafe fn build_settings_menu(&self, pt: POINT) -> u32 {
         let menu = CreatePopupMenu().unwrap();
-        let append = |m: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str| {
-            let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
-            let _ = AppendMenuW(m, flags, id as usize, PCWSTR(wide.as_ptr()));
-        };
+        let append =
+            |m: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str| menu_item(m, flags, id, text);
         append(
             menu,
             MF_STRING | MF_GRAYED,
@@ -902,7 +912,7 @@ impl App {
             lang_cmd,
             MF_BYCOMMAND.0,
         );
-        let lang_title: Vec<u16> = tr("menu_language").encode_utf16().chain([0]).collect();
+        let lang_title = wide(&tr("menu_language"));
         let _ = AppendMenuW(menu, MF_POPUP, lang_menu.0 as usize, PCWSTR(lang_title.as_ptr()));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -931,7 +941,7 @@ impl App {
             CMD_HOTKEY_FILES,
             &hk_label("btn_files", &self.settings.hotkey_files),
         );
-        let hk_title: Vec<u16> = tr("menu_hotkeys").encode_utf16().chain([0]).collect();
+        let hk_title = wide(&tr("menu_hotkeys"));
         let _ = AppendMenuW(menu, MF_POPUP, hk_menu.0 as usize, PCWSTR(hk_title.as_ptr()));
         append(menu, MF_STRING, CMD_ROLLOUT, &tr("menu_rollout"));
         append(menu, MF_STRING, CMD_CHANGE_FOLDER, &tr("menu_change_folder"));
@@ -1005,11 +1015,9 @@ impl App {
             let _ = GetCursorPos(&mut pt);
             let _ = SetForegroundWindow(self.hwnd);
             let menu = CreatePopupMenu().unwrap();
-            let show: Vec<u16> = tr("tray_show").encode_utf16().chain([0]).collect();
-            let exit: Vec<u16> = tr("tray_exit").encode_utf16().chain([0]).collect();
-            let _ = AppendMenuW(menu, MF_STRING, CMD_TRAY_SHOW as usize, PCWSTR(show.as_ptr()));
+            menu_item(menu, MF_STRING, CMD_TRAY_SHOW, &tr("tray_show"));
             let _ = SetMenuDefaultItem(menu, CMD_TRAY_SHOW, 0);
-            let _ = AppendMenuW(menu, MF_STRING, CMD_TRAY_EXIT as usize, PCWSTR(exit.as_ptr()));
+            menu_item(menu, MF_STRING, CMD_TRAY_EXIT, &tr("tray_exit"));
             let cmd = TrackPopupMenu(
                 menu,
                 TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
@@ -1242,50 +1250,68 @@ del \"%~f0\"\r\n";
         let theme = render::theme(self.dark);
         let l = self.layout();
         let (w, h) = self.client_size();
-        let pad = 16.0;
 
         ctx.begin(theme.bg);
+        self.draw_header(&ctx, &theme, &l, w);
+        self.draw_peers(&ctx, &theme, &l, w);
+        self.draw_buttons(&ctx, &theme, &l);
+        self.draw_log(&ctx, &theme, &l, w);
+        if self.capturing.is_some() {
+            self.draw_capture_overlay(&ctx, &theme, w, h);
+        }
+        ctx.end();
+        self.render = Some(ctx);
+    }
 
-        // шапка
-        ctx.text("BuferNet", Rect::new(pad, 10.0, w, 48.0), 26.0, 600, theme.text, HAlign::Left, false);
+    /// Шапка: название, версия, имя этого компьютера, шестерёнка.
+    fn draw_header(&self, ctx: &render::Ctx, theme: &render::Theme, l: &Layout, w: f32) {
+        ctx.text("BuferNet", Rect::new(PAD_L, 10.0, w, 48.0), 26.0, 600, theme.text, HAlign::Left, false);
         let title_w = ctx.measure_width("BuferNet", 26.0, 600);
         ctx.text(
             &format!("v{}", config::VERSION),
-            Rect::new(pad + title_w + 8.0, 24.0, w, 44.0),
+            Rect::new(PAD_L + title_w + 8.0, 24.0, w, 44.0),
             12.5,
             400,
             theme.muted,
             HAlign::Left,
             false,
         );
+        // имя этого компьютера справа: иконка ПК + текст
+        let dev_r = l.gear.l - 10.0;
+        let dev_w = ctx.measure_width(&self.disco.my_name, 12.5, 400);
+        ctx.icon(
+            ico::PC,
+            Rect::new(dev_r - dev_w - 6.0 - 15.0, l.gear.t, dev_r - dev_w - 6.0, l.gear.b),
+            14.0,
+            theme.muted,
+        );
         ctx.text(
-            &format!("💻 {}", self.disco.my_name),
-            Rect::new(pad, l.gear.t, l.gear.l - 10.0, l.gear.b),
+            &self.disco.my_name,
+            Rect::new(PAD_L, l.gear.t, dev_r, l.gear.b),
             12.5,
             400,
             theme.muted,
             HAlign::Right,
             true,
         );
-        // шестерёнка
         if matches!(self.hover, Hit::Gear) {
             let c = if self.pressed == Some(Hit::Gear) { theme.press } else { theme.hover };
             ctx.fill_round(l.gear, 6.0, c);
         }
-        ctx.text("⚙", l.gear, 16.0, 400, theme.text, HAlign::Center, true);
+        ctx.icon(ico::GEAR, l.gear, 15.0, theme.text);
+    }
 
-        // заголовок списка
+    /// Заголовок и карточка списка компьютеров с видимыми строками.
+    fn draw_peers(&self, ctx: &render::Ctx, theme: &render::Theme, l: &Layout, w: f32) {
         ctx.text(
             &tr("peers"),
-            Rect::new(pad, 58.0, w - pad, 80.0),
+            Rect::new(PAD_L, 58.0, w - PAD, 80.0),
             14.0,
             600,
             theme.text,
             HAlign::Left,
             false,
         );
-
-        // карточка списка
         ctx.fill_round(l.list, 8.0, theme.card);
         ctx.stroke_round(l.list, 8.0, theme.border, 1.0);
         ctx.push_clip(Rect::new(l.list.l, l.list.t + 1.0, l.list.r, l.list.b - 1.0));
@@ -1307,8 +1333,7 @@ del \"%~f0\"\r\n";
             }
             let top = l.list.t + 4.0 + vi as f32 * ROW_H;
             let row = Rect::new(l.list.l + 4.0, top, l.list.r - 4.0, top + ROW_H - 2.0);
-            let selected = self.selected.as_deref() == Some(peer.id.as_str());
-            if selected {
+            if self.selected.as_deref() == Some(peer.id.as_str()) {
                 ctx.fill_round(row, 6.0, theme.sel_bg);
                 // акцентная полоска слева, как в списках Windows 11
                 let pill = Rect::new(
@@ -1321,9 +1346,15 @@ del \"%~f0\"\r\n";
             } else if self.hover == Hit::Peer(i) {
                 ctx.fill_round(row, 6.0, theme.hover);
             }
+            ctx.icon(
+                ico::PC,
+                Rect::new(row.l + 12.0, row.t, row.l + 30.0, row.b),
+                15.0,
+                theme.muted,
+            );
             ctx.text(
-                &format!("💻  {}", peer.name),
-                Rect::new(row.l + 14.0, row.t, row.r - 150.0, row.b),
+                &peer.name,
+                Rect::new(row.l + 36.0, row.t, row.r - 150.0, row.b),
                 13.5,
                 400,
                 theme.text,
@@ -1346,8 +1377,10 @@ del \"%~f0\"\r\n";
             );
         }
         ctx.pop_clip();
+    }
 
-        // кнопки
+    /// Три кнопки: отправить буфер (акцентная), отправить файлы, открыть папку.
+    fn draw_buttons(&self, ctx: &render::Ctx, theme: &render::Theme, l: &Layout) {
         let accent_bg = if self.pressed == Some(Hit::BtnClip) {
             theme.accent_press
         } else if self.hover == Hit::BtnClip {
@@ -1356,15 +1389,7 @@ del \"%~f0\"\r\n";
             theme.accent
         };
         ctx.fill_round(l.btn_clip, 6.0, accent_bg);
-        ctx.text(
-            &format!("📋  {}", tr("btn_clipboard")),
-            l.btn_clip,
-            13.5,
-            600,
-            theme.accent_text,
-            HAlign::Center,
-            true,
-        );
+        ctx.icon_label(ico::CLIPBOARD, &tr("btn_clipboard"), l.btn_clip, 13.5, 600, theme.accent_text);
         let secondary = |hit: Hit| {
             if self.pressed == Some(hit) {
                 theme.press
@@ -1376,31 +1401,17 @@ del \"%~f0\"\r\n";
         };
         ctx.fill_round(l.btn_files, 6.0, secondary(Hit::BtnFiles));
         ctx.stroke_round(l.btn_files, 6.0, theme.border, 1.0);
-        ctx.text(
-            &format!("📁  {}", tr("btn_files")),
-            l.btn_files,
-            13.5,
-            400,
-            theme.text,
-            HAlign::Center,
-            true,
-        );
+        ctx.icon_label(ico::FILE, &tr("btn_files"), l.btn_files, 13.5, 400, theme.text);
         ctx.fill_round(l.btn_folder, 6.0, secondary(Hit::BtnFolder));
         ctx.stroke_round(l.btn_folder, 6.0, theme.border, 1.0);
-        ctx.text(
-            &format!("📂 {}", tr("btn_folder")),
-            l.btn_folder,
-            13.5,
-            400,
-            theme.text,
-            HAlign::Center,
-            true,
-        );
+        ctx.icon_label(ico::FOLDER, &tr("menu_open_folder"), l.btn_folder, 13.5, 400, theme.text);
+    }
 
-        // журнал
+    /// Журнал: карточка с текстом и ползунком прокрутки (обновляет log.scroll/bar).
+    fn draw_log(&mut self, ctx: &render::Ctx, theme: &render::Theme, l: &Layout, w: f32) {
         ctx.text(
             &tr("log"),
-            Rect::new(pad, l.log.t - 30.0, w - pad, l.log.t - 4.0),
+            Rect::new(PAD_L, l.log.t - 30.0, w - PAD, l.log.t - 4.0),
             14.0,
             600,
             theme.text,
@@ -1409,61 +1420,46 @@ del \"%~f0\"\r\n";
         );
         ctx.fill_round(l.log, 8.0, theme.log_bg);
         ctx.stroke_round(l.log, 8.0, theme.border, 1.0);
-        let content = self.log.join("\n");
+        let content = self.log.lines.join("\n");
         let inner_w = (l.log.w() - 24.0).max(10.0);
         let view_h = l.log.h() - 16.0;
-        if let Ok(layout) = ctx.layout(&content, 12.5, 400, inner_w, true) {
-            let content_h = render::Ctx::layout_height(&layout);
-            let max_scroll = (content_h - view_h).max(0.0);
-            if self.log_at_bottom {
-                self.log_scroll = max_scroll;
-            }
-            self.log_scroll = self.log_scroll.clamp(0.0, max_scroll);
-            self.log_view = (content_h, view_h);
-            ctx.push_clip(Rect::new(l.log.l + 1.0, l.log.t + 1.0, l.log.r - 1.0, l.log.b - 1.0));
-            ctx.draw_layout(&layout, l.log.l + 12.0, l.log.t + 8.0 - self.log_scroll, theme.text);
-            ctx.pop_clip();
-            // ползунок
-            if content_h > view_h {
-                let track_top = l.log.t + 4.0;
-                let track_h = l.log.h() - 8.0;
-                let bar_h = (track_h * view_h / content_h).max(24.0);
-                let ratio = if max_scroll > 0.0 { self.log_scroll / max_scroll } else { 0.0 };
-                let bar_top = track_top + ratio * (track_h - bar_h);
-                let wide = matches!(self.hover, Hit::LogBar) || self.drag_bar.is_some();
-                let bar_w = if wide { 6.0 } else { 3.0 };
-                let bar = Rect::new(l.log.r - 6.0 - bar_w, bar_top, l.log.r - 6.0, bar_top + bar_h);
-                ctx.fill_round(bar, bar_w / 2.0, theme.scrollbar);
-                self.log_bar = Some(bar);
-            } else {
-                self.log_bar = None;
-            }
+        let Ok(layout) = ctx.layout(&content, 12.5, 400, inner_w, true) else {
+            return;
+        };
+        let content_h = render::Ctx::layout_height(&layout);
+        let max_scroll = (content_h - view_h).max(0.0);
+        if self.log.at_bottom {
+            self.log.scroll = max_scroll;
         }
-
-        // режим захвата нового сочетания: затемнение + карточка-подсказка
-        if self.capturing.is_some() {
-            ctx.fill_round(Rect::new(0.0, 0.0, w, h), 0.0, render::rgba(0x000000, 0.55));
-            let (cw, ch) = (330.0_f32.min(w - 32.0), 96.0);
-            let card = Rect::new(
-                w / 2.0 - cw / 2.0,
-                h / 2.0 - ch / 2.0,
-                w / 2.0 + cw / 2.0,
-                h / 2.0 + ch / 2.0,
-            );
-            ctx.fill_round(card, 8.0, theme.card);
-            ctx.stroke_round(card, 8.0, theme.accent, 1.5);
-            ctx.text(
-                &tr("hotkey_capture"),
-                card,
-                13.5,
-                400,
-                theme.text,
-                HAlign::Center,
-                true,
-            );
+        self.log.scroll = self.log.scroll.clamp(0.0, max_scroll);
+        self.log.view = (content_h, view_h);
+        ctx.push_clip(Rect::new(l.log.l + 1.0, l.log.t + 1.0, l.log.r - 1.0, l.log.b - 1.0));
+        ctx.draw_layout(&layout, l.log.l + 12.0, l.log.t + 8.0 - self.log.scroll, theme.text);
+        ctx.pop_clip();
+        // ползунок
+        if content_h > view_h {
+            let track_top = l.log.t + 4.0;
+            let track_h = l.log.h() - 8.0;
+            let bar_h = (track_h * view_h / content_h).max(24.0);
+            let ratio = if max_scroll > 0.0 { self.log.scroll / max_scroll } else { 0.0 };
+            let bar_top = track_top + ratio * (track_h - bar_h);
+            let bar_hot = matches!(self.hover, Hit::LogBar) || self.log.drag.is_some();
+            let bar_w = if bar_hot { 6.0 } else { 3.0 };
+            let bar = Rect::new(l.log.r - 6.0 - bar_w, bar_top, l.log.r - 6.0, bar_top + bar_h);
+            ctx.fill_round(bar, bar_w / 2.0, theme.scrollbar);
+            self.log.bar = Some(bar);
+        } else {
+            self.log.bar = None;
         }
+    }
 
-        ctx.end();
-        self.render = Some(ctx);
+    /// Затемнение и карточка-подсказка в режиме захвата нового сочетания клавиш.
+    fn draw_capture_overlay(&self, ctx: &render::Ctx, theme: &render::Theme, w: f32, h: f32) {
+        ctx.fill_round(Rect::new(0.0, 0.0, w, h), 0.0, render::rgba(0x000000, 0.55));
+        let (cw, ch) = (330.0_f32.min(w - 32.0), 96.0);
+        let card = Rect::new(w / 2.0 - cw / 2.0, h / 2.0 - ch / 2.0, w / 2.0 + cw / 2.0, h / 2.0 + ch / 2.0);
+        ctx.fill_round(card, 8.0, theme.card);
+        ctx.stroke_round(card, 8.0, theme.accent, 1.5);
+        ctx.text(&tr("hotkey_capture"), card, 13.5, 400, theme.text, HAlign::Center, true);
     }
 }

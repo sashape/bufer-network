@@ -24,6 +24,16 @@ pub fn log(msg: String) {
     push(UiEvent::Log(msg));
 }
 
+/// Результат действия: всплывающее уведомление (для действий по хоткею,
+/// когда окно не на виду) либо просто строка в журнал.
+pub fn report(toast: bool, msg: String) {
+    if toast {
+        push(UiEvent::Toast(msg));
+    } else {
+        log(msg);
+    }
+}
+
 pub fn drain() -> Vec<UiEvent> {
     std::mem::take(&mut *EVENTS.lock().unwrap())
 }

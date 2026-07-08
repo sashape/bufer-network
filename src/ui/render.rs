@@ -6,8 +6,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use windows::core::{w, Interface};
-use windows::Win32::Foundation::HWND;
+use windows::core::{w, Interface, PCWSTR};
+use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
     D2D_SIZE_U,
@@ -20,12 +20,14 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 
@@ -142,6 +144,8 @@ pub struct Ctx {
     brush: Option<ID2D1SolidColorBrush>,
     // ключ: размер*10 в старших битах + вес; форматы переживают кадры
     formats: RefCell<HashMap<u64, IDWriteTextFormat>>,
+    icon_formats: RefCell<HashMap<u32, IDWriteTextFormat>>, // ключ: размер*10
+    icon_family: Vec<u16>, // "Segoe Fluent Icons" (Win11) или "Segoe MDL2 Assets" (Win10)
 }
 
 impl Ctx {
@@ -150,6 +154,7 @@ impl Ctx {
             let d2d: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let icon_family = detect_icon_family(&dwrite);
             Ok(Ctx {
                 _d2d: d2d,
                 dwrite,
@@ -158,6 +163,8 @@ impl Ctx {
                 rt: None,
                 brush: None,
                 formats: RefCell::new(HashMap::new()),
+                icon_formats: RefCell::new(HashMap::new()),
+                icon_family,
             })
         }
     }
@@ -297,10 +304,94 @@ impl Ctx {
             } else {
                 DWRITE_WORD_WRAPPING_NO_WRAP
             });
+            // однострочный текст, который не влезает, обрезаем многоточием,
+            // а не жёстко по краю (кнопки, имена компьютеров и т.п.)
+            if !wrap {
+                if let Ok(sign) = self.dwrite.CreateEllipsisTrimmingSign(&f) {
+                    let trimming = DWRITE_TRIMMING {
+                        granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                        delimiter: 0,
+                        delimiterCount: 0,
+                    };
+                    let _ = f.SetTrimming(&trimming, &sign);
+                }
+            }
             f
         };
         self.formats.borrow_mut().insert(key, f.clone());
         f
+    }
+
+    fn icon_format(&self, size: f32) -> IDWriteTextFormat {
+        let key = (size * 10.0) as u32;
+        if let Some(f) = self.icon_formats.borrow().get(&key) {
+            return f.clone();
+        }
+        let f = unsafe {
+            let f = self
+                .dwrite
+                .CreateTextFormat(
+                    PCWSTR(self.icon_family.as_ptr()),
+                    None,
+                    DWRITE_FONT_WEIGHT(400),
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!(""),
+                )
+                .unwrap();
+            let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            f
+        };
+        self.icon_formats.borrow_mut().insert(key, f.clone());
+        f
+    }
+
+    /// Иконка-глиф из Segoe Fluent Icons, отцентрованная в прямоугольнике.
+    pub fn icon(&self, codepoint: u32, rect: Rect, size: f32, color: D2D1_COLOR_F) {
+        let Some(rt) = &self.rt else { return };
+        let Some(ch) = char::from_u32(codepoint) else { return };
+        let wide: Vec<u16> = ch.to_string().encode_utf16().collect();
+        let format = self.icon_format(size);
+        unsafe {
+            rt.DrawText(
+                &wide,
+                &format,
+                &rect.d2d(),
+                &self.brush(color),
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    /// Иконка + подпись, отцентрованные как группа в прямоугольнике (для кнопок).
+    pub fn icon_label(
+        &self,
+        glyph: u32,
+        label: &str,
+        rect: Rect,
+        size: f32,
+        weight: u32,
+        color: D2D1_COLOR_F,
+    ) {
+        let text_w = self.measure_width(label, size, weight);
+        let icon_w = size + 3.0;
+        let gap = 7.0;
+        let total = icon_w + gap + text_w;
+        let start = (rect.l + (rect.w() - total) / 2.0).max(rect.l);
+        self.icon(glyph, Rect::new(start, rect.t, start + icon_w, rect.b), size + 3.0, color);
+        self.text(
+            label,
+            Rect::new(start + icon_w + gap, rect.t, rect.r, rect.b),
+            size,
+            weight,
+            color,
+            HAlign::Left,
+            true,
+        );
     }
 
     /// Текст в прямоугольнике: halign + вертикальное центрирование по желанию.
@@ -388,4 +479,27 @@ impl Ctx {
             }
         }
     }
+}
+
+/// Шрифт-иконки: на Windows 11 это Segoe Fluent Icons, на 10 — запасной
+/// Segoe MDL2 Assets (общие глифы делят одни и те же коды).
+fn detect_icon_family(dwrite: &IDWriteFactory) -> Vec<u16> {
+    let fluent: Vec<u16> = "Segoe Fluent Icons\0".encode_utf16().collect();
+    unsafe {
+        let mut coll: Option<IDWriteFontCollection> = None;
+        if dwrite.GetSystemFontCollection(&mut coll, BOOL(0)).is_ok() {
+            if let Some(coll) = coll {
+                let mut index = 0u32;
+                let mut exists = BOOL(0);
+                if coll
+                    .FindFamilyName(PCWSTR(fluent.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    return fluent;
+                }
+            }
+        }
+    }
+    "Segoe MDL2 Assets\0".encode_utf16().collect()
 }

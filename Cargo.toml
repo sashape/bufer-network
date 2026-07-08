@@ -1,6 +1,6 @@
 [package]
 name = "bufernet"
-version = "2.2.2"
+version = "2.2.3"
 edition = "2021"
 description = "Clipboard and file transfer over LAN"
 license = "MIT"
