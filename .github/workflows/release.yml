@@ -14,17 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Установка зависимостей
-        run: pip install -r requirements.txt pyinstaller
-
       - name: Сборка exe
-        run: pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --collect-all sv_ttk --exclude-module numpy --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module PIL.AvifImagePlugin --exclude-module PIL._avif --exclude-module PIL.WebPImagePlugin --exclude-module PIL._webp --exclude-module PIL._imagingft --exclude-module PIL.ImageCms --exclude-module PIL._imagingcms main.py
+        run: cargo build --release
+
+      - name: Переименование
+        run: Copy-Item target/release/bufernet.exe BuferNet.exe
 
       - name: Релиз с exe
-        run: gh release create ${{ github.ref_name }} dist/BuferNet.exe --generate-notes
+        run: gh release create ${{ github.ref_name }} BuferNet.exe --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

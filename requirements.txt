@@ -1,5 +1,0 @@
-pyperclip>=1.9
-pystray>=0.19
-Pillow>=11.0
-sv-ttk>=2.6
-pywinstyles>=1.8

@@ -4,6 +4,10 @@ Clipboard and file transfer between computers on the same local network.
 Lives in the system tray and discovers other computers automatically —
 no IP addresses, no configuration.
 
+Written in Rust with a hand-drawn Direct2D interface — no UI frameworks,
+a single exe under 0.5 MB. Fully protocol-compatible with the Python
+version (v1.x): old and new instances see each other and exchange data.
+
 ## Features
 
 - 📋 Send clipboard text — it lands straight in the other computer's clipboard
@@ -17,14 +21,12 @@ no IP addresses, no configuration.
 ## Install
 
 Download `BuferNet.exe` from [Releases](../../releases) and run it on each
-computer — no Python required. Allow access to **private networks** when the
-Windows Firewall asks.
+computer. Allow access to **private networks** when the Windows Firewall asks.
 
 From source:
 
 ```
-pip install -r requirements.txt
-pythonw main.py
+cargo run --release
 ```
 
 ## Notes
@@ -39,11 +41,19 @@ pythonw main.py
 ## Build
 
 ```
-pip install pyinstaller
-pyinstaller --noconsole --onefile --name BuferNet --hidden-import pystray._win32 --collect-all sv_ttk --exclude-module numpy --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module PIL.AvifImagePlugin --exclude-module PIL._avif --exclude-module PIL.WebPImagePlugin --exclude-module PIL._webp --exclude-module PIL._imagingft --exclude-module PIL.ImageCms --exclude-module PIL._imagingcms main.py
+cargo build --release
 ```
 
+The exe lands in `target/release/bufernet.exe` (~480 KB, no dependencies).
 Pushing a `v*` tag builds the exe and publishes a GitHub Release automatically.
+
+## Architecture
+
+- `src/ui/` — bare Win32 window, all widgets drawn by hand with
+  Direct2D/DirectWrite (system components, nothing bundled into the exe)
+- `src/discovery.rs` — UDP broadcast peer discovery (port 48765)
+- `src/transfer.rs` — TCP transfer of clipboard/files/updates (port 48766)
+- `src/json.rs` — tiny JSON parser for the wire protocol, no serde
 
 ## License
 

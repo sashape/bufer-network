@@ -10,6 +10,9 @@ build/
 dist/
 *.spec
 
+# Rust
+/target/
+
 # IDE
 .idea/
 .vscode/
