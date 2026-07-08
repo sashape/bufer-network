@@ -7,6 +7,7 @@ use std::sync::Mutex;
 pub enum UiEvent {
     Log(String),
     ClipboardReceived { text: String, sender: String },
+    ImageReceived { data: Vec<u8>, sender: String },
     FileReceived { path: PathBuf, sender: String },
     UpdateReceived { path: PathBuf, version: String, sender: String },
 }

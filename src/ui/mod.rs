@@ -27,6 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 // в windows-rs лежит в UI::Controls — не тянем целую фичу ради одной константы
 const WM_MOUSELEAVE: u32 = 0x02A3;
+// клик по всплывающему уведомлению трея (shellapi.h)
+const NIN_BALLOONUSERCLICK: u32 = 0x0405;
 
 use crate::config;
 use crate::discovery::{Discovery, Peer};
@@ -51,6 +53,13 @@ const CMD_TRAY_EXIT: u32 = 141;
 
 const ROWS_VISIBLE: usize = 5;
 const ROW_H: f32 = 38.0;
+
+/// Что делать по клику на последнее уведомление в трее.
+#[derive(Clone, PartialEq)]
+enum NotifyAction {
+    ShowWindow,
+    OpenFile(PathBuf), // Проводник с выделенным файлом
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
@@ -93,6 +102,7 @@ struct App {
     tracking_leave: bool,
     render: Option<render::Ctx>,
     tray: tray::Tray,
+    notify_action: NotifyAction,
 }
 
 pub fn run(disco: Arc<Discovery>, server_port: u16) {
@@ -140,6 +150,7 @@ pub fn run(disco: Arc<Discovery>, server_port: u16) {
             tracking_leave: false,
             render: None,
             tray: tray::Tray::new(HWND::default(), Default::default()),
+            notify_action: NotifyAction::ShowWindow,
         });
 
         let title: Vec<u16> = config::APP_NAME.encode_utf16().chain([0]).collect();
@@ -405,7 +416,7 @@ impl App {
                 WM_CLOSE => {
                     // закрытие окна — сворачивание в трей, приложение живёт
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
-                    self.tray.notify(&tr("tray_minimized"));
+                    self.notify(&tr("tray_minimized"), NotifyAction::ShowWindow);
                     LRESULT(0)
                 }
                 WM_DESTROY => {
@@ -417,6 +428,10 @@ impl App {
                     match (lparam.0 & 0xFFFF) as u32 {
                         WM_LBUTTONUP => self.show_window(),
                         WM_RBUTTONUP | WM_CONTEXTMENU => self.tray_menu(),
+                        NIN_BALLOONUSERCLICK => match self.notify_action.clone() {
+                            NotifyAction::ShowWindow => self.show_window(),
+                            NotifyAction::OpenFile(path) => self.reveal_in_explorer(&path),
+                        },
                         _ => {}
                     }
                     LRESULT(0)
@@ -570,7 +585,15 @@ impl App {
                         ("name", &sender),
                         ("preview", &preview),
                     ]));
-                    self.tray.notify(&trf("notify_clip", &[("name", &sender)]));
+                    self.notify(&trf("notify_clip", &[("name", &sender)]), NotifyAction::ShowWindow);
+                }
+                UiEvent::ImageReceived { data, sender } => {
+                    clipboard::set_dib(&data);
+                    self.push_log(trf("img_received", &[
+                        ("name", &sender),
+                        ("size", &transfer::fmt_size(data.len() as u64)),
+                    ]));
+                    self.notify(&trf("notify_img", &[("name", &sender)]), NotifyAction::ShowWindow);
                 }
                 UiEvent::FileReceived { path, sender } => {
                     self.push_log(trf("file_received", &[
@@ -581,10 +604,10 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    self.tray.notify(&trf("notify_file", &[
-                        ("file", &name),
-                        ("name", &sender),
-                    ]));
+                    self.notify(
+                        &trf("notify_file", &[("file", &name), ("name", &sender)]),
+                        NotifyAction::OpenFile(path),
+                    );
                 }
                 UiEvent::UpdateReceived { path, version, sender } => {
                     self.on_update_received(path, version, sender);
@@ -596,6 +619,31 @@ impl App {
     fn push_log(&mut self, msg: String) {
         self.log.push(msg);
         self.invalidate();
+    }
+
+    /// Уведомление в трее + что сделать, если по нему кликнут.
+    fn notify(&mut self, msg: &str, action: NotifyAction) {
+        self.notify_action = action;
+        self.tray.notify(msg);
+    }
+
+    /// Открыть Проводник с выделенным файлом.
+    fn reveal_in_explorer(&self, path: &Path) {
+        // explorer /select молча игнорирует прямые слэши (а они приходят
+        // из настроек, записанных Python-версией) — нормализуем
+        let normalized = path.display().to_string().replace('/', "\\");
+        let args = format!("/select,\"{normalized}\"");
+        let wide: Vec<u16> = args.encode_utf16().chain([0]).collect();
+        unsafe {
+            ShellExecuteW(
+                self.hwnd,
+                w!("open"),
+                w!("explorer.exe"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
 
     fn refresh_peers(&mut self) {
@@ -656,15 +704,32 @@ impl App {
 
     fn send_clipboard(&mut self) {
         let Some(peer) = self.require_peer() else { return };
+        let my_name = self.disco.my_name.clone();
+        // в буфере текст — шлём текст; иначе картинка (скриншот и т.п.)
         let text = clipboard::get_text().unwrap_or_default();
-        if text.is_empty() {
+        if !text.is_empty() {
+            std::thread::spawn(move || {
+                match transfer::send_clipboard(&peer.ip, peer.port, &text, &my_name) {
+                    Ok(()) => events::log(trf("clip_sent", &[("name", &peer.name)])),
+                    Err(e) => events::log(trf("clip_send_fail", &[
+                        ("name", &peer.name),
+                        ("error", &e.to_string()),
+                    ])),
+                }
+            });
+            return;
+        }
+        let Some(dib) = clipboard::get_dib() else {
+            dialogs::info(self.hwnd, &tr("clipboard_empty"));
+            return;
+        };
+        if dib.len() as u64 > config::MAX_IMAGE_SIZE {
             dialogs::info(self.hwnd, &tr("clipboard_empty"));
             return;
         }
-        let my_name = self.disco.my_name.clone();
         std::thread::spawn(move || {
-            match transfer::send_clipboard(&peer.ip, peer.port, &text, &my_name) {
-                Ok(()) => events::log(trf("clip_sent", &[("name", &peer.name)])),
+            match transfer::send_image(&peer.ip, peer.port, &dib, &my_name) {
+                Ok(()) => events::log(trf("img_sent", &[("name", &peer.name)])),
                 Err(e) => events::log(trf("clip_send_fail", &[
                     ("name", &peer.name),
                     ("error", &e.to_string()),
@@ -947,10 +1012,10 @@ impl App {
             ("version", &version),
             ("name", &sender),
         ]));
-        self.tray.notify(&trf("notify_update", &[
-            ("version", &version),
-            ("name", &sender),
-        ]));
+        self.notify(
+            &trf("notify_update", &[("version", &version), ("name", &sender)]),
+            NotifyAction::ShowWindow,
+        );
         self.apply_update(&path);
     }
 

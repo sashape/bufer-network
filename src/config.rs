@@ -19,6 +19,8 @@ pub const PEER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Максимальный размер текста буфера обмена (защита от мусора), байт
 pub const MAX_CLIPBOARD_SIZE: u64 = 16 * 1024 * 1024;
+/// Максимальный размер картинки из буфера (несжатый DIB), байт
+pub const MAX_IMAGE_SIZE: u64 = 64 * 1024 * 1024;
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")

@@ -10,8 +10,9 @@ version (v1.x): old and new instances see each other and exchange data.
 
 ## Features
 
-- 📋 Send clipboard text — it lands straight in the other computer's clipboard
-- 📁 Send files — saved to a folder of your choice (`Downloads\BuferNet` by default)
+- 📋 Send clipboard text or images — they land straight in the other computer's clipboard
+- 📁 Send files — saved to a folder of your choice (`Downloads\BuferNet` by default);
+  clicking the notification opens the folder with the file selected
 - 🔍 Automatic peer discovery on the LAN (UDP broadcast)
 - 🖥 Windows 11 style UI: light/dark theme, HiDPI aware
 - 🌍 Languages: English, Русский, Français, Deutsch, Español

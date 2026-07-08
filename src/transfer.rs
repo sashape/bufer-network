@@ -6,6 +6,7 @@
 //!
 //!     {"type": "hello", "name": "PC-1"}\n
 //!     {"type": "clipboard", "size": 12}\n<12 байт utf-8>
+//!     {"type": "image", "size": 123456}\n<123456 байт DIB>   (с v2.2)
 //!     {"type": "file", "name": "photo.jpg", "size": 123456}\n<123456 байт>
 //!     {"type": "end"}\n
 
@@ -95,6 +96,18 @@ fn handle(conn: TcpStream, sender: &mut String) -> io::Result<()> {
                 let text = String::from_utf8(data).map_err(|_| bad_data("bad utf-8"))?;
                 events::push(UiEvent::ClipboardReceived {
                     text,
+                    sender: sender.clone(),
+                });
+            }
+            Some("image") => {
+                let size = get_size()?;
+                if size > config::MAX_IMAGE_SIZE {
+                    return Err(bad_data("image too large"));
+                }
+                let mut data = vec![0u8; size as usize];
+                reader.read_exact(&mut data)?;
+                events::push(UiEvent::ImageReceived {
+                    data,
                     sender: sender.clone(),
                 });
             }
@@ -225,6 +238,18 @@ pub fn send_clipboard(ip: &str, port: u16, text: &str, my_name: &str) -> io::Res
         ("size", data.len().to_string()),
     ])?;
     sock.write_all(data)?;
+    end(&mut sock)
+}
+
+pub fn send_image(ip: &str, port: u16, dib: &[u8], my_name: &str) -> io::Result<()> {
+    let mut sock = connect(ip, port)?;
+    sock.set_write_timeout(Some(Duration::from_secs(60)))?;
+    hello(&mut sock, my_name)?;
+    send_header(&mut sock, &[
+        ("type", json::quote("image")),
+        ("size", dib.len().to_string()),
+    ])?;
+    sock.write_all(dib)?;
     end(&mut sock)
 }
 
