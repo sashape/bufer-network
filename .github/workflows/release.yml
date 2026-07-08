@@ -17,10 +17,16 @@ jobs:
       - name: Сборка exe
         run: cargo build --release
 
+      - name: Сборка MSI
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          wix build wix/bufernet.wxs -d ProductVersion=$v -arch x64 -o BuferNet.msi
+
       - name: Переименование
         run: Copy-Item target/release/bufernet.exe BuferNet.exe
 
-      - name: Релиз с exe
-        run: gh release create ${{ github.ref_name }} BuferNet.exe --generate-notes
+      - name: Релиз с exe и msi
+        run: gh release create ${{ github.ref_name }} BuferNet.exe BuferNet.msi --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

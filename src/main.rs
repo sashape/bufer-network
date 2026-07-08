@@ -3,6 +3,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod autostart;
 mod clipboard;
 mod config;
 mod discovery;

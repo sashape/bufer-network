@@ -20,8 +20,14 @@ version (v1.x): old and new instances see each other and exchange data.
 
 ## Install
 
-Download `BuferNet.exe` from [Releases](../../releases) and run it on each
-computer. Allow access to **private networks** when the Windows Firewall asks.
+Download from [Releases](../../releases) — either one works on each computer:
+
+- `BuferNet.msi` — per-user install (no admin rights): Start Menu shortcut
+  and **start with Windows** enabled out of the box
+- `BuferNet.exe` — portable, just run it
+
+Allow access to **private networks** when the Windows Firewall asks.
+Autostart can be toggled any time in the ⚙ menu.
 
 From source:
 
@@ -45,7 +51,14 @@ cargo build --release
 ```
 
 The exe lands in `target/release/bufernet.exe` (~480 KB, no dependencies).
-Pushing a `v*` tag builds the exe and publishes a GitHub Release automatically.
+
+MSI (needs the [WiX](https://wixtoolset.org) CLI, `dotnet tool install --global wix --version 5.0.2`):
+
+```
+wix build wix/bufernet.wxs -d ProductVersion=2.1.0 -arch x64 -o BuferNet.msi
+```
+
+Pushing a `v*` tag builds both and publishes a GitHub Release automatically.
 
 ## Architecture
 

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Per-user MSI: ставится в %LOCALAPPDATA%\Programs\BuferNet без прав
+  администратора. Это принципиально: сетевое самообновление перезаписывает
+  свой exe, что невозможно в Program Files. Установщик также прописывает
+  автозапуск в HKCU\...\Run - тем же значением управляет галочка в меню ⚙.
+
+  Сборка: wix build wix/bufernet.wxs -d ProductVersion=X.Y.Z -arch x64 -o BuferNet.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="BuferNet"
+           Manufacturer="BuferNet"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="d556f8b0-98bc-4a4a-9233-a55baa76122b"
+           Scope="perUser"
+           Language="1033"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of BuferNet is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="BuferNet" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="Product" Directory="INSTALLFOLDER">
+      <!-- per-user компоненты обязаны иметь KeyPath в HKCU, не файл -->
+      <Component Id="MainExe" Guid="14f8adcc-18f3-4e16-b67e-bdf3aba60e63">
+        <!-- путь от корня репозитория: wix запускается из него -->
+        <File Id="MainExe" Source="target\release\bufernet.exe" Name="BuferNet.exe" />
+        <RegistryValue Root="HKCU" Key="Software\BuferNet" Name="InstallDir"
+                       Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+
+      <!-- автозапуск при входе в Windows; удаляется вместе с программой -->
+      <Component Id="Autostart" Guid="7cf32a4c-3bda-4e96-a815-8a390deebe0d">
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="BuferNet" Type="string"
+                       Value="&quot;[INSTALLFOLDER]BuferNet.exe&quot;" KeyPath="yes" />
+      </Component>
+
+      <Component Id="StartMenuShortcut" Guid="62128ced-82a0-4e62-9d23-5e9518ded56d">
+        <Shortcut Id="AppShortcut" Directory="ProgramMenuFolder" Name="BuferNet"
+                  Target="[INSTALLFOLDER]BuferNet.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\BuferNet" Name="Shortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Product" />
+    </Feature>
+  </Package>
+</Wix>

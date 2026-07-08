@@ -45,6 +45,7 @@ const CMD_LANG_AUTO: u32 = 120; // 121..=125 — языки по порядку
 const CMD_ROLLOUT: u32 = 130;
 const CMD_OPEN_FOLDER: u32 = 131;
 const CMD_CHANGE_FOLDER: u32 = 132;
+const CMD_AUTOSTART: u32 = 133;
 const CMD_TRAY_SHOW: u32 = 140;
 const CMD_TRAY_EXIT: u32 = 141;
 
@@ -759,6 +760,12 @@ impl App {
         let _ = AppendMenuW(menu, MF_POPUP, lang_menu.0 as usize, PCWSTR(lang_title.as_ptr()));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let auto_flags = if crate::autostart::enabled() {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        append(menu, auto_flags, CMD_AUTOSTART, &tr("menu_autostart"));
         append(menu, MF_STRING, CMD_ROLLOUT, &tr("menu_rollout"));
         append(menu, MF_STRING, CMD_OPEN_FOLDER, &tr("menu_open_folder"));
         append(menu, MF_STRING, CMD_CHANGE_FOLDER, &tr("menu_change_folder"));
@@ -794,6 +801,9 @@ impl App {
             c if c > CMD_LANG_AUTO && c <= CMD_LANG_AUTO + i18n::LANGUAGES.len() as u32 => {
                 let code = i18n::LANGUAGES[(c - CMD_LANG_AUTO - 1) as usize].0;
                 self.set_language(code.into());
+            }
+            CMD_AUTOSTART => {
+                crate::autostart::set(!crate::autostart::enabled());
             }
             CMD_ROLLOUT => self.rollout_update(),
             CMD_OPEN_FOLDER => {
