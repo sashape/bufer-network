@@ -17,6 +17,9 @@ version (v1.x): old and new instances see each other and exchange data.
 - 🖥 Windows 11 style UI: light/dark theme, HiDPI aware
 - 🌍 Languages: English, Русский, Français, Deutsch, Español
 - 🔔 Tray notifications for received clipboard and files
+- ⌨️ Global hotkeys for quick send: `Ctrl+Alt+B` — clipboard, `Ctrl+Alt+F` — files
+  (change or disable them in the ⚙ menu)
+- ☝️ Single instance: launching a second copy just brings up the running window
 - 🚀 Network-wide updates: one click rolls a new version out to every computer
 
 ## Install

@@ -20,7 +20,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_ALT, MOD_CONTROL,
+    MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -29,12 +30,14 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 // клик по всплывающему уведомлению трея (shellapi.h)
 const NIN_BALLOONUSERCLICK: u32 = 0x0405;
+/// «Покажи окно» — шлёт вторая копия программы перед своим выходом.
+pub const WM_APP_SHOW: u32 = WM_APP + 2;
 
 use crate::config;
 use crate::discovery::{Discovery, Peer};
 use crate::events::{self, UiEvent};
 use crate::i18n::{self, tr, trf};
-use crate::{clipboard, icon, transfer};
+use crate::{clipboard, hotkeys, icon, transfer};
 
 use render::{HAlign, Rect};
 use tray::TRAY_MSG;
@@ -48,6 +51,8 @@ const CMD_ROLLOUT: u32 = 130;
 const CMD_OPEN_FOLDER: u32 = 131;
 const CMD_CHANGE_FOLDER: u32 = 132;
 const CMD_AUTOSTART: u32 = 133;
+const CMD_HOTKEY_CLIP: u32 = 150;
+const CMD_HOTKEY_FILES: u32 = 151;
 const CMD_TRAY_SHOW: u32 = 140;
 const CMD_TRAY_EXIT: u32 = 141;
 
@@ -103,6 +108,7 @@ struct App {
     render: Option<render::Ctx>,
     tray: tray::Tray,
     notify_action: NotifyAction,
+    capturing: Option<i32>, // id хоткея, для которого ловим новое сочетание
 }
 
 pub fn run(disco: Arc<Discovery>, server_port: u16) {
@@ -151,6 +157,7 @@ pub fn run(disco: Arc<Discovery>, server_port: u16) {
             render: None,
             tray: tray::Tray::new(HWND::default(), Default::default()),
             notify_action: NotifyAction::ShowWindow,
+            capturing: None,
         });
 
         let title: Vec<u16> = config::APP_NAME.encode_utf16().chain([0]).collect();
@@ -264,6 +271,7 @@ impl App {
                 WM_CREATE => {
                     self.scale = GetDpiForWindow(self.hwnd) as f32 / 96.0;
                     self.apply_titlebar();
+                    self.register_hotkeys();
                     SetTimer(self.hwnd, 1, 200, None);
                     events::log(trf("log_start", &[
                         ("app", config::APP_NAME),
@@ -422,6 +430,26 @@ impl App {
                 WM_DESTROY => {
                     self.tray.remove();
                     PostQuitMessage(0);
+                    LRESULT(0)
+                }
+                WM_APP_SHOW => {
+                    self.show_window();
+                    LRESULT(0)
+                }
+                WM_HOTKEY => {
+                    match wparam.0 as i32 {
+                        hotkeys::ID_CLIP => self.send_clipboard(),
+                        hotkeys::ID_FILES => self.send_files(),
+                        _ => {}
+                    }
+                    LRESULT(0)
+                }
+                WM_KEYDOWN | WM_SYSKEYDOWN if self.capturing.is_some() => {
+                    self.capture_key(wparam.0 as u32);
+                    LRESULT(0)
+                }
+                WM_KILLFOCUS if self.capturing.is_some() => {
+                    self.finish_capture(None); // ушёл фокус — отмена без изменений
                     LRESULT(0)
                 }
                 TRAY_MSG => {
@@ -831,6 +859,27 @@ impl App {
             MF_STRING
         };
         append(menu, auto_flags, CMD_AUTOSTART, &tr("menu_autostart"));
+        let hk_menu = CreatePopupMenu().unwrap();
+        let hk_label = |key: &str, s: &str| {
+            let combo = hotkeys::parse(s)
+                .map(hotkeys::display)
+                .unwrap_or_else(|| tr("hotkey_off"));
+            format!("{}\t{}", tr(key), combo)
+        };
+        append(
+            hk_menu,
+            MF_STRING,
+            CMD_HOTKEY_CLIP,
+            &hk_label("btn_clipboard", &self.settings.hotkey_clip),
+        );
+        append(
+            hk_menu,
+            MF_STRING,
+            CMD_HOTKEY_FILES,
+            &hk_label("btn_files", &self.settings.hotkey_files),
+        );
+        let hk_title: Vec<u16> = tr("menu_hotkeys").encode_utf16().chain([0]).collect();
+        let _ = AppendMenuW(menu, MF_POPUP, hk_menu.0 as usize, PCWSTR(hk_title.as_ptr()));
         append(menu, MF_STRING, CMD_ROLLOUT, &tr("menu_rollout"));
         append(menu, MF_STRING, CMD_OPEN_FOLDER, &tr("menu_open_folder"));
         append(menu, MF_STRING, CMD_CHANGE_FOLDER, &tr("menu_change_folder"));
@@ -870,6 +919,8 @@ impl App {
             CMD_AUTOSTART => {
                 crate::autostart::set(!crate::autostart::enabled());
             }
+            CMD_HOTKEY_CLIP => self.start_capture(hotkeys::ID_CLIP),
+            CMD_HOTKEY_FILES => self.start_capture(hotkeys::ID_FILES),
             CMD_ROLLOUT => self.rollout_update(),
             CMD_OPEN_FOLDER => {
                 let dir = config::downloads_dir();
@@ -949,6 +1000,84 @@ impl App {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
+    }
+
+    // --- горячие клавиши ---
+
+    fn register_hotkeys(&mut self) {
+        let pairs = [
+            (hotkeys::ID_CLIP, self.settings.hotkey_clip.clone()),
+            (hotkeys::ID_FILES, self.settings.hotkey_files.clone()),
+        ];
+        for (id, s) in pairs {
+            if let Some(c) = hotkeys::parse(&s) {
+                if !hotkeys::register(self.hwnd, id, c) {
+                    self.push_log(trf("hotkey_conflict", &[("combo", &hotkeys::display(c))]));
+                }
+            }
+        }
+    }
+
+    fn unregister_hotkeys(&self) {
+        hotkeys::unregister(self.hwnd, hotkeys::ID_CLIP);
+        hotkeys::unregister(self.hwnd, hotkeys::ID_FILES);
+    }
+
+    /// Режим «нажмите новое сочетание»: снимаем текущие хоткеи, чтобы
+    /// они не срабатывали, пока пользователь их перенастраивает.
+    fn start_capture(&mut self, id: i32) {
+        self.unregister_hotkeys();
+        self.capturing = Some(id);
+        self.show_window();
+        unsafe {
+            let _ = SetFocus(self.hwnd);
+        }
+        self.invalidate();
+    }
+
+    fn capture_key(&mut self, vk: u32) {
+        match vk {
+            0x1B => self.finish_capture(None), // Esc — отмена
+            0x2E | 0x08 => self.finish_capture(Some(String::new())), // Del/Backspace — выключить
+            // сами модификаторы ждём дальше
+            0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
+            _ => {
+                let mut mods = 0u32;
+                unsafe {
+                    if GetKeyState(0x11) < 0 {
+                        mods |= MOD_CONTROL.0;
+                    }
+                    if GetKeyState(0x12) < 0 {
+                        mods |= MOD_ALT.0;
+                    }
+                    if GetKeyState(0x10) < 0 {
+                        mods |= MOD_SHIFT.0;
+                    }
+                    if GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0 {
+                        mods |= MOD_WIN.0;
+                    }
+                }
+                let s = hotkeys::serialize(hotkeys::Combo { mods, vk });
+                // parse отсеет сочетания без ctrl/alt/win и неизвестные клавиши
+                if hotkeys::parse(&s).is_some() {
+                    self.finish_capture(Some(s));
+                }
+            }
+        }
+    }
+
+    fn finish_capture(&mut self, new_value: Option<String>) {
+        let Some(id) = self.capturing.take() else { return };
+        if let Some(v) = new_value {
+            if id == hotkeys::ID_CLIP {
+                self.settings.hotkey_clip = v;
+            } else {
+                self.settings.hotkey_files = v;
+            }
+            config::save_settings(&self.settings);
+        }
+        self.register_hotkeys();
+        self.invalidate();
     }
 
     // --- обновление по сети ---
@@ -1073,7 +1202,7 @@ del \"%~f0\"\r\n";
 
         let theme = render::theme(self.dark);
         let l = self.layout();
-        let (w, _h) = self.client_size();
+        let (w, h) = self.client_size();
         let pad = 16.0;
 
         ctx.begin(theme.bg);
@@ -1257,6 +1386,29 @@ del \"%~f0\"\r\n";
             } else {
                 self.log_bar = None;
             }
+        }
+
+        // режим захвата нового сочетания: затемнение + карточка-подсказка
+        if self.capturing.is_some() {
+            ctx.fill_round(Rect::new(0.0, 0.0, w, h), 0.0, render::rgba(0x000000, 0.55));
+            let (cw, ch) = (330.0_f32.min(w - 32.0), 96.0);
+            let card = Rect::new(
+                w / 2.0 - cw / 2.0,
+                h / 2.0 - ch / 2.0,
+                w / 2.0 + cw / 2.0,
+                h / 2.0 + ch / 2.0,
+            );
+            ctx.fill_round(card, 8.0, theme.card);
+            ctx.stroke_round(card, 8.0, theme.accent, 1.5);
+            ctx.text(
+                &tr("hotkey_capture"),
+                card,
+                13.5,
+                400,
+                theme.text,
+                HAlign::Center,
+                true,
+            );
         }
 
         ctx.end();

@@ -64,6 +64,8 @@ pub struct Settings {
     pub theme: String,        // "auto" / "light" / "dark"
     pub lang: String,         // "auto" / код из i18n
     pub download_dir: String, // пустая = по умолчанию
+    pub hotkey_clip: String,  // "ctrl+alt+b"; пустая = выключено
+    pub hotkey_files: String, // "ctrl+alt+f"; пустая = выключено
 }
 
 pub fn load_settings() -> Settings {
@@ -71,6 +73,8 @@ pub fn load_settings() -> Settings {
         theme: "auto".into(),
         lang: "auto".into(),
         download_dir: String::new(),
+        hotkey_clip: "ctrl+alt+b".into(),
+        hotkey_files: "ctrl+alt+f".into(),
     };
     let Ok(text) = std::fs::read_to_string(settings_file()) else {
         return s;
@@ -90,6 +94,14 @@ pub fn load_settings() -> Settings {
     if let Some(v) = get("download_dir") {
         s.download_dir = v;
     }
+    // ключ присутствует, но пуст — хоткей осознанно выключен;
+    // ключа нет (старые настройки) — остаётся значение по умолчанию
+    if let Some(v) = get("hotkey_clip") {
+        s.hotkey_clip = v;
+    }
+    if let Some(v) = get("hotkey_files") {
+        s.hotkey_files = v;
+    }
     s
 }
 
@@ -97,6 +109,8 @@ pub fn save_settings(s: &Settings) {
     let mut pairs: Vec<(&str, String)> = vec![
         ("theme", json::quote(&s.theme)),
         ("lang", json::quote(&s.lang)),
+        ("hotkey_clip", json::quote(&s.hotkey_clip)),
+        ("hotkey_files", json::quote(&s.hotkey_files)),
     ];
     if !s.download_dir.is_empty() {
         pairs.push(("download_dir", json::quote(&s.download_dir)));

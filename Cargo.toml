@@ -1,6 +1,6 @@
 [package]
 name = "bufernet"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 description = "Clipboard and file transfer over LAN"
 license = "MIT"
@@ -26,6 +26,8 @@ features = [
     "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Security",
     "Win32_Globalization",
     "Win32_Networking_WinSock",
 ]
