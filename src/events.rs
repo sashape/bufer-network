@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 pub enum UiEvent {
     Log(String),
+    /// Запись в журнал + всплывающее уведомление (для действий по хоткею).
+    Toast(String),
     ClipboardReceived { text: String, sender: String },
     ImageReceived { data: Vec<u8>, sender: String },
     FileReceived { path: PathBuf, sender: String },

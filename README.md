@@ -56,10 +56,11 @@ cargo build --release
 
 The exe lands in `target/release/bufernet.exe` (~480 KB, no dependencies).
 
-MSI (needs the [WiX](https://wixtoolset.org) CLI, `dotnet tool install --global wix --version 5.0.2`):
+MSI (needs the [WiX](https://wixtoolset.org) CLI, `dotnet tool install --global wix --version 5.0.2`,
+plus the UI and Util extensions: `wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2`):
 
 ```
-wix build wix/bufernet.wxs -d ProductVersion=2.1.0 -arch x64 -o BuferNet.msi
+wix build wix/bufernet.wxs -d ProductVersion=2.2.2 -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -o BuferNet.msi
 ```
 
 Pushing a `v*` tag builds both and publishes a GitHub Release automatically.

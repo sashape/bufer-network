@@ -1,6 +1,6 @@
 [package]
 name = "bufernet"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 description = "Clipboard and file transfer over LAN"
 license = "MIT"
@@ -31,6 +31,9 @@ features = [
     "Win32_Globalization",
     "Win32_Networking_WinSock",
 ]
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"

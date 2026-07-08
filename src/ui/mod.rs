@@ -48,9 +48,9 @@ const CMD_THEME_LIGHT: u32 = 111;
 const CMD_THEME_DARK: u32 = 112;
 const CMD_LANG_AUTO: u32 = 120; // 121..=125 — языки по порядку
 const CMD_ROLLOUT: u32 = 130;
-const CMD_OPEN_FOLDER: u32 = 131;
 const CMD_CHANGE_FOLDER: u32 = 132;
 const CMD_AUTOSTART: u32 = 133;
+const CMD_EXIT: u32 = 134;
 const CMD_HOTKEY_CLIP: u32 = 150;
 const CMD_HOTKEY_FILES: u32 = 151;
 const CMD_TRAY_SHOW: u32 = 140;
@@ -73,6 +73,7 @@ enum Hit {
     Peer(usize),
     BtnClip,
     BtnFiles,
+    BtnFolder,
     Log,
     LogBar,
 }
@@ -82,6 +83,7 @@ struct Layout {
     list: Rect,
     btn_clip: Rect,
     btn_files: Rect,
+    btn_folder: Rect,
     log: Rect,
 }
 
@@ -413,7 +415,12 @@ impl App {
                 WM_SETCURSOR => {
                     let clickable = matches!(
                         self.hover,
-                        Hit::Gear | Hit::Peer(_) | Hit::BtnClip | Hit::BtnFiles | Hit::LogBar
+                        Hit::Gear
+                            | Hit::Peer(_)
+                            | Hit::BtnClip
+                            | Hit::BtnFiles
+                            | Hit::BtnFolder
+                            | Hit::LogBar
                     );
                     if clickable {
                         SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());
@@ -438,8 +445,8 @@ impl App {
                 }
                 WM_HOTKEY => {
                     match wparam.0 as i32 {
-                        hotkeys::ID_CLIP => self.send_clipboard(),
-                        hotkeys::ID_FILES => self.send_files(),
+                        hotkeys::ID_CLIP => self.send_clipboard(true),
+                        hotkeys::ID_FILES => self.send_files(true),
                         _ => {}
                     }
                     LRESULT(0)
@@ -520,9 +527,12 @@ impl App {
         let list_top = 84.0;
         let list = Rect::new(pad, list_top, w - pad, list_top + 8.0 + ROWS_VISIBLE as f32 * ROW_H);
         let btn_top = list.b + 14.0;
-        let mid = w / 2.0;
-        let btn_clip = Rect::new(pad, btn_top, mid - 4.0, btn_top + 36.0);
-        let btn_files = Rect::new(mid + 4.0, btn_top, w - pad, btn_top + 36.0);
+        // [буфер][файлы][📂 папка]: папка фиксированной ширины, остальные — поровну
+        let folder_w = 96.0;
+        let btn_folder = Rect::new(w - pad - folder_w, btn_top, w - pad, btn_top + 36.0);
+        let flex = (btn_folder.l - 8.0 - pad - 8.0) / 2.0;
+        let btn_clip = Rect::new(pad, btn_top, pad + flex, btn_top + 36.0);
+        let btn_files = Rect::new(pad + flex + 8.0, btn_top, btn_folder.l - 8.0, btn_top + 36.0);
         let log_top = btn_top + 36.0 + 44.0;
         let log = Rect::new(pad, log_top, w - pad, (h - pad).max(log_top + 40.0));
         Layout {
@@ -530,6 +540,7 @@ impl App {
             list,
             btn_clip,
             btn_files,
+            btn_folder,
             log,
         }
     }
@@ -544,6 +555,9 @@ impl App {
         }
         if l.btn_files.contains(x, y) {
             return Hit::BtnFiles;
+        }
+        if l.btn_folder.contains(x, y) {
+            return Hit::BtnFolder;
         }
         if let Some(bar) = self.log_bar {
             // ползунок ловится с запасом по ширине
@@ -602,6 +616,10 @@ impl App {
         for ev in events::drain() {
             match ev {
                 UiEvent::Log(msg) => self.push_log(msg),
+                UiEvent::Toast(msg) => {
+                    self.notify(&msg, NotifyAction::ShowWindow);
+                    self.push_log(msg);
+                }
                 UiEvent::ClipboardReceived { text, sender } => {
                     clipboard::set_text(&text);
                     let mut preview: String =
@@ -653,6 +671,26 @@ impl App {
     fn notify(&mut self, msg: &str, action: NotifyAction) {
         self.notify_action = action;
         self.tray.notify(msg);
+    }
+
+    /// Открыть папку принятых файлов.
+    fn open_downloads(&self) {
+        let dir = config::downloads_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        // прямые слэши из старых настроек ShellExecute переживает,
+        // но нормализуем для единообразия
+        let normalized = dir.display().to_string().replace('/', "\\");
+        let wide: Vec<u16> = normalized.encode_utf16().chain([0]).collect();
+        unsafe {
+            ShellExecuteW(
+                self.hwnd,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
 
     /// Открыть Проводник с выделенным файлом.
@@ -716,8 +754,9 @@ impl App {
                     self.invalidate();
                 }
             }
-            Hit::BtnClip => self.send_clipboard(),
-            Hit::BtnFiles => self.send_files(),
+            Hit::BtnClip => self.send_clipboard(false),
+            Hit::BtnFiles => self.send_files(false),
+            Hit::BtnFolder => self.open_downloads(),
             _ => {}
         }
     }
@@ -730,16 +769,25 @@ impl App {
         peer
     }
 
-    fn send_clipboard(&mut self) {
+    /// toast: показать результат всплывающим уведомлением — для действий
+    /// по глобальному хоткею, когда окно программы не на виду.
+    fn send_clipboard(&mut self, toast: bool) {
         let Some(peer) = self.require_peer() else { return };
         let my_name = self.disco.my_name.clone();
+        let report = move |msg: String| {
+            if toast {
+                events::push(UiEvent::Toast(msg));
+            } else {
+                events::log(msg);
+            }
+        };
         // в буфере текст — шлём текст; иначе картинка (скриншот и т.п.)
         let text = clipboard::get_text().unwrap_or_default();
         if !text.is_empty() {
             std::thread::spawn(move || {
                 match transfer::send_clipboard(&peer.ip, peer.port, &text, &my_name) {
-                    Ok(()) => events::log(trf("clip_sent", &[("name", &peer.name)])),
-                    Err(e) => events::log(trf("clip_send_fail", &[
+                    Ok(()) => report(trf("clip_sent", &[("name", &peer.name)])),
+                    Err(e) => report(trf("clip_send_fail", &[
                         ("name", &peer.name),
                         ("error", &e.to_string()),
                     ])),
@@ -757,8 +805,8 @@ impl App {
         }
         std::thread::spawn(move || {
             match transfer::send_image(&peer.ip, peer.port, &dib, &my_name) {
-                Ok(()) => events::log(trf("img_sent", &[("name", &peer.name)])),
-                Err(e) => events::log(trf("clip_send_fail", &[
+                Ok(()) => report(trf("img_sent", &[("name", &peer.name)])),
+                Err(e) => report(trf("clip_send_fail", &[
                     ("name", &peer.name),
                     ("error", &e.to_string()),
                 ])),
@@ -766,7 +814,7 @@ impl App {
         });
     }
 
-    fn send_files(&mut self) {
+    fn send_files(&mut self, toast: bool) {
         let Some(peer) = self.require_peer() else { return };
         let paths = dialogs::pick_files(self.hwnd, &tr("file_dialog_title"));
         if paths.is_empty() {
@@ -784,12 +832,17 @@ impl App {
                     ("size", &transfer::fmt_size(size)),
                 ]));
             });
-            match result {
-                Ok(()) => events::log(trf("files_done", &[("name", &peer.name)])),
-                Err(e) => events::log(trf("files_fail", &[
+            let msg = match result {
+                Ok(()) => trf("files_done", &[("name", &peer.name)]),
+                Err(e) => trf("files_fail", &[
                     ("name", &peer.name),
                     ("error", &e.to_string()),
-                ])),
+                ]),
+            };
+            if toast {
+                events::push(UiEvent::Toast(msg));
+            } else {
+                events::log(msg);
             }
         });
     }
@@ -881,8 +934,9 @@ impl App {
         let hk_title: Vec<u16> = tr("menu_hotkeys").encode_utf16().chain([0]).collect();
         let _ = AppendMenuW(menu, MF_POPUP, hk_menu.0 as usize, PCWSTR(hk_title.as_ptr()));
         append(menu, MF_STRING, CMD_ROLLOUT, &tr("menu_rollout"));
-        append(menu, MF_STRING, CMD_OPEN_FOLDER, &tr("menu_open_folder"));
         append(menu, MF_STRING, CMD_CHANGE_FOLDER, &tr("menu_change_folder"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append(menu, MF_STRING, CMD_EXIT, &tr("tray_exit"));
 
         let cmd = TrackPopupMenu(
             menu,
@@ -922,22 +976,7 @@ impl App {
             CMD_HOTKEY_CLIP => self.start_capture(hotkeys::ID_CLIP),
             CMD_HOTKEY_FILES => self.start_capture(hotkeys::ID_FILES),
             CMD_ROLLOUT => self.rollout_update(),
-            CMD_OPEN_FOLDER => {
-                let dir = config::downloads_dir();
-                let _ = std::fs::create_dir_all(&dir);
-                let wide: Vec<u16> =
-                    dir.display().to_string().encode_utf16().chain([0]).collect();
-                unsafe {
-                    ShellExecuteW(
-                        self.hwnd,
-                        w!("open"),
-                        PCWSTR(wide.as_ptr()),
-                        PCWSTR::null(),
-                        PCWSTR::null(),
-                        SW_SHOWNORMAL,
-                    );
-                }
-            }
+            CMD_EXIT => self.quit(),
             CMD_CHANGE_FOLDER => {
                 if let Some(dir) = dialogs::pick_folder(self.hwnd, &tr("folder_dialog_title")) {
                     config::set_downloads_dir(dir.clone());
@@ -1326,18 +1365,31 @@ del \"%~f0\"\r\n";
             HAlign::Center,
             true,
         );
-        let files_bg = if self.pressed == Some(Hit::BtnFiles) {
-            theme.press
-        } else if self.hover == Hit::BtnFiles {
-            theme.hover
-        } else {
-            theme.card
+        let secondary = |hit: Hit| {
+            if self.pressed == Some(hit) {
+                theme.press
+            } else if self.hover == hit {
+                theme.hover
+            } else {
+                theme.card
+            }
         };
-        ctx.fill_round(l.btn_files, 6.0, files_bg);
+        ctx.fill_round(l.btn_files, 6.0, secondary(Hit::BtnFiles));
         ctx.stroke_round(l.btn_files, 6.0, theme.border, 1.0);
         ctx.text(
             &format!("📁  {}", tr("btn_files")),
             l.btn_files,
+            13.5,
+            400,
+            theme.text,
+            HAlign::Center,
+            true,
+        );
+        ctx.fill_round(l.btn_folder, 6.0, secondary(Hit::BtnFolder));
+        ctx.stroke_round(l.btn_folder, 6.0, theme.border, 1.0);
+        ctx.text(
+            &format!("📂 {}", tr("btn_folder")),
+            l.btn_folder,
             13.5,
             400,
             theme.text,

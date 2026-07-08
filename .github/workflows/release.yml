@@ -20,8 +20,10 @@ jobs:
       - name: Сборка MSI
         run: |
           dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
           $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          wix build wix/bufernet.wxs -d ProductVersion=$v -arch x64 -o BuferNet.msi
+          wix build wix/bufernet.wxs -d ProductVersion=$v -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -o BuferNet.msi
 
       - name: Переименование
         run: Copy-Item target/release/bufernet.exe BuferNet.exe
